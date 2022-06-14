@@ -1,2 +1,4 @@
 /target
 .env.sh
+# This is a library hence cargo lock should not be commited
+Cargo.lock
