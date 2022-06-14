@@ -1,12 +1,35 @@
 use anyhow::Result;
+use ethabi::{Event, EventParam, ParamType};
 use tokio::sync::broadcast;
 use web3::types::{Address, FilterBuilder, H256, U64};
 use web3::{api, transports, Web3};
 
-/// returns the erc20 transfer topic
-pub fn erc20_transfer() -> Result<H256> {
-    let topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-    Ok(H256::from_slice(hex::decode(topic)?.as_slice()))
+/// returns the erc20 transfer event
+/// "event Transfer(address indexed from, address indexed to, uint value)"
+pub fn erc20_transfer() -> Result<Event> {
+    let params = vec![
+        EventParam {
+            name: "from".to_string(),
+            kind: ParamType::Address,
+            indexed: true,
+        },
+        EventParam {
+            name: "to".to_string(),
+            kind: ParamType::Address,
+            indexed: true,
+        },
+        EventParam {
+            name: "value".to_string(),
+            kind: ParamType::Uint(256),
+            indexed: false,
+        },
+    ];
+    let event = Event {
+        name: "Transfer".to_string(),
+        inputs: params,
+        anonymous: false,
+    };
+    Ok(event)
 }
 
 #[derive(Debug)]
@@ -73,8 +96,9 @@ impl Stream {
 mod tests {
     use super::{erc20_transfer, Stream};
     use anyhow::Result;
+    use ethabi::{Event, EventParam, ParamType};
     use std::env;
-    use web3::types::{Address, BlockNumber, FilterBuilder, U64};
+    use web3::types::{Address, BlockNumber, FilterBuilder, H256, U64};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
@@ -105,6 +129,8 @@ mod tests {
         // check how to use eth logs
         let stream = test_stream().await?;
         let web3 = stream.http_web3()?;
+        let event = erc20_transfer()?;
+        let sig = event.signature();
         // we use alchemy link and they are gigachads that do not allow ranges bigger than 2k
         // hence motivation for this entire lib
         let filter = FilterBuilder::default()
@@ -112,11 +138,16 @@ mod tests {
             .from_block(BlockNumber::Number(stream.from_block))
             // just get 10 blocks to make sure this returns
             .to_block(BlockNumber::Number(stream.from_block + U64::from(10u64)))
-            .topics(Some(vec![erc20_transfer()?]), None, None, None)
+            .topics(
+                Some(vec![H256::from_slice(sig.as_bytes())]),
+                None,
+                None,
+                None,
+            )
             .build();
 
         let logs = web3.eth().logs(filter).await?;
-        assert!(logs.len() > 0);
+        assert_eq!(logs.len(), 59);
         Ok(())
     }
 }
