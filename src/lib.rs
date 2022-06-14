@@ -1,8 +1,16 @@
-use anyhow;
-use web3::types::{Address, U64};
+use anyhow::Result;
+use tokio::sync::broadcast;
+use web3::types::{Address, FilterBuilder, H256, U64};
 use web3::{api, transports, Web3};
+
+/// returns the erc20 transfer topic
+pub fn erc20_transfer() -> Result<H256> {
+    let topic = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+    Ok(H256::from_slice(hex::decode(topic)?.as_slice()))
+}
+
 #[derive(Debug)]
-pub enum StreamMode {
+enum StreamMode {
     /// stream blocks that are going to be mined
     /// and are not mined yet
     LiveStream,
@@ -21,7 +29,7 @@ pub struct Stream {
 }
 
 impl Stream {
-    pub fn http_web3(&self) -> anyhow::Result<api::Web3<web3::transports::Http>> {
+    pub fn http_web3(&self) -> Result<api::Web3<web3::transports::Http>> {
         let transport = transports::Http::new(&self.http_url)?;
         Ok(Web3::new(transport))
     }
@@ -31,7 +39,7 @@ impl Stream {
         contract_address: Address,
         from_block: U64,
         to_block: U64,
-    ) -> anyhow::Result<Stream> {
+    ) -> Result<Stream> {
         let mut s = Stream {
             http_url,
             contract_address,
@@ -51,34 +59,64 @@ impl Stream {
         };
         Ok(s)
     }
+
+    // pub async fn stream(&self, sender: broadcast::Sender<i32>) -> Result<()> {
+    //     let web3 = self.http_web3()?;
+    //     let filter = FilterBuilder::default().address(Vec::new());
+    //     web3.eth().logs(filter)
+    //     sender.send(1);
+    //     Ok(())
+    // }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Stream;
-    use web3::types::{Address, U64};
+    use super::{erc20_transfer, Stream};
+    use anyhow::Result;
     use std::env;
+    use web3::types::{Address, BlockNumber, FilterBuilder, U64};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    async fn test_stream() -> anyhow::Result<Stream> {
-        let http_url= env::var("HTTP_NODE_URL")?;
+    async fn test_stream() -> Result<Stream> {
+        let http_url = env::var("HTTP_NODE_URL")?;
         let contract_address = Address::from_slice(hex::decode(USDC)?.as_slice());
         let from_block = U64::from(14658323u64);
-        let to_block = U64::from(14658343u64);
+        // from + 3500
+        let to_block = U64::from(14661823u64);
         Stream::new(http_url, contract_address, from_block, to_block).await
     }
 
     #[test]
-    fn test_contract_addr() -> anyhow::Result<()> {
+    fn test_contract_addr() -> Result<()> {
         // figure out how to have an eth address as the datatype
         Address::from_slice(hex::decode(USDC)?.as_slice());
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_new_historical() -> anyhow::Result<()> {
+    async fn test_new_historical() -> Result<()> {
         test_stream().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_eth_logs() -> Result<()> {
+        // check how to use eth logs
+        let stream = test_stream().await?;
+        let web3 = stream.http_web3()?;
+        // we use alchemy link and they are gigachads that do not allow ranges bigger than 2k
+        // hence motivation for this entire lib
+        let filter = FilterBuilder::default()
+            .address(vec![stream.contract_address])
+            .from_block(BlockNumber::Number(stream.from_block))
+            // just get 10 blocks to make sure this returns
+            .to_block(BlockNumber::Number(stream.from_block + U64::from(10u64)))
+            .topics(Some(vec![erc20_transfer()?]), None, None, None)
+            .build();
+
+        let logs = web3.eth().logs(filter).await?;
+        assert!(logs.len() > 0);
         Ok(())
     }
 }
