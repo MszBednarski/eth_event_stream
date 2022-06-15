@@ -12,15 +12,6 @@ use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H160, H256, U256,
 use web3::{api, transports, Web3};
 
 #[derive(Debug)]
-enum StreamMode {
-    /// stream blocks that are going to be mined
-    /// and are not mined yet
-    LiveStream,
-    /// stream only historical blocks
-    HistoricalStream,
-}
-
-#[derive(Debug)]
 pub struct Stream {
     pub http_url: String,
     pub contract_address: Address,
@@ -31,7 +22,6 @@ pub struct Stream {
     /// used for the filter builder
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
-    mode: StreamMode,
 }
 
 impl Stream {
@@ -60,25 +50,16 @@ impl Stream {
     ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
-        let mut s = Stream {
+        let s = Stream {
             http_url,
             contract_address,
             from_block,
             to_block,
             // I found that 2 block delay usually feeds reliably
             confirmation_blocks: 2u8,
-            mode: StreamMode::HistoricalStream,
             event,
             f_contract_address,
             f_topic,
-        };
-        let web3 = s.http_web3()?;
-        // set the stream mode to live or historical
-        // based on the users request
-        let block_number = web3.eth().block_number().await?;
-        s.mode = match block_number >= s.to_block {
-            true => StreamMode::HistoricalStream,
-            false => StreamMode::LiveStream,
         };
         Ok(s)
     }
@@ -88,7 +69,7 @@ impl Stream {
     /// sorts logs in ascending order the way they were emmited
     pub async fn get_logs(
         &self,
-        web3: web3::api::Web3<Http>,
+        web3: &web3::api::Web3<Http>,
         from_block: U64,
         to_block: U64,
     ) -> Result<Vec<RichLog>> {
@@ -101,20 +82,51 @@ impl Stream {
         Ok(parsed_log)
     }
 
+    /// gets logs that are old enough to be finalized for sure
+    /// streams it through sender to consoomers
+    async fn stream_historical_logs(
+        &self,
+        sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+        from_block: U64,
+        to_block: U64,
+        block_step: u64,
+    ) -> Result<()> {
+        let web3 = self.http_web3()?;
+        let mut sink = LogSink::new(sender, 0);
+        // get in batches of size block_step
+        let mut start = from_block;
+        while start < to_block {
+            let mut end = start + block_step;
+            if end > to_block {
+                end = to_block
+            }
+            sink.put_logs(self.get_logs(&web3, start, end).await?)?;
+            start = start + block_step + 1;
+        }
+        sink.flush_remaining()?;
+        Ok(())
+    }
+
     /// uses parameter sender to send blocks of eth logs to all recievers
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
     pub async fn block_stream(
         &self,
         sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+        block_step: u64,
     ) -> Result<()> {
-        // we use alchemy and they are gigachads that do not allow ranges bigger than 2k on the eth.logs call
-        // hence motivation for this entire lib
         let web3 = self.http_web3()?;
-        let mut sink = LogSink::new(sender, self.confirmation_blocks);
-        let logs = self.get_logs(web3, self.from_block, self.to_block).await?;
-        sink.put_logs(logs)?;
-        sink.flush_remaining()
+        // set the stream mode to live or historical
+        // based on the users request
+        let cur_block_number = web3.eth().block_number().await?;
+        let mut safe_last_historical = self.to_block;
+        // if we need to stream live too
+        if cur_block_number < self.to_block {
+            safe_last_historical = cur_block_number - self.confirmation_blocks;
+        }
+        self.stream_historical_logs(sender, self.from_block, safe_last_historical, block_step)
+            .await?;
+        Ok(())
     }
 }
 
@@ -168,7 +180,7 @@ mod test {
         let stream = test_stream().await?;
         let (snd, mut rx) = broadcast::channel(1000);
         // run it as a separate task
-        tokio::spawn(async move { stream.block_stream(snd).await });
+        tokio::spawn(async move { stream.block_stream(snd, 2).await });
 
         let mut item = rx.recv().await;
 
