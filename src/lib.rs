@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ethabi::{Event, EventParam, ParamType};
 use tokio::sync::broadcast;
-use web3::types::{Address, FilterBuilder, H256, U64};
+use web3::types::{Address, BlockNumber, Filter, FilterBuilder, Log, H256, U64};
 use web3::{api, transports, Web3};
 
 /// returns the erc20 transfer event
@@ -48,6 +48,8 @@ pub struct Stream {
     pub confirmation_blocks: u8,
     pub from_block: U64,
     pub to_block: U64,
+    pub event: Event,
+    filter: Filter,
     mode: StreamMode,
 }
 
@@ -62,7 +64,20 @@ impl Stream {
         contract_address: Address,
         from_block: U64,
         to_block: U64,
+        event: Event,
     ) -> Result<Stream> {
+        let filter = FilterBuilder::default()
+            .address(vec![contract_address])
+            .from_block(BlockNumber::Number(from_block))
+            // just get 10 blocks to make sure this returns
+            .to_block(BlockNumber::Number(to_block))
+            .topics(
+                Some(vec![H256::from_slice(event.signature().as_bytes())]),
+                None,
+                None,
+                None,
+            )
+            .build();
         let mut s = Stream {
             http_url,
             contract_address,
@@ -71,6 +86,8 @@ impl Stream {
             // I found that 2 block delay usually feeds reliably
             confirmation_blocks: 2u8,
             mode: StreamMode::HistoricalStream,
+            filter,
+            event,
         };
         let web3 = s.http_web3()?;
         // set the stream mode to live or historical
@@ -83,13 +100,21 @@ impl Stream {
         Ok(s)
     }
 
-    // pub async fn stream(&self, sender: broadcast::Sender<i32>) -> Result<()> {
-    //     let web3 = self.http_web3()?;
-    //     let filter = FilterBuilder::default().address(Vec::new());
-    //     web3.eth().logs(filter)
-    //     sender.send(1);
-    //     Ok(())
-    // }
+    /// uses parameter sender to send blocks of eth logs to all recievers
+    /// on broadcast the logs are sorted in ascending order the way they were emmited
+    /// in the blockchain EVM
+    pub async fn block_stream(
+        &self,
+        sender: broadcast::Sender<(BlockNumber, Vec<Log>)>,
+    ) -> Result<()> {
+        // we use alchemy and they are gigachads that do not allow ranges bigger than 2k on the eth.logs call
+        // hence motivation for this entire lib
+        let web3 = self.http_web3()?;
+        let filter = self.filter.clone();
+        let logs = web3.eth().logs(filter).await?;
+        sender.send((BlockNumber::from(9), logs))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -97,7 +122,8 @@ mod tests {
     use super::{erc20_transfer, Stream};
     use anyhow::Result;
     use ethabi::{Event, EventParam, ParamType};
-    use std::env;
+    use std::{borrow::BorrowMut, env};
+    use tokio::sync::broadcast;
     use web3::types::{Address, BlockNumber, FilterBuilder, H256, U64};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
@@ -106,9 +132,10 @@ mod tests {
         let http_url = env::var("HTTP_NODE_URL")?;
         let contract_address = Address::from_slice(hex::decode(USDC)?.as_slice());
         let from_block = U64::from(14658323u64);
-        // from + 3500
-        let to_block = U64::from(14661823u64);
-        Stream::new(http_url, contract_address, from_block, to_block).await
+        // from + 10
+        let to_block = from_block + U64::from(10u64);
+        let event = erc20_transfer()?;
+        Stream::new(http_url, contract_address, from_block, to_block, event).await
     }
 
     #[test]
@@ -125,29 +152,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_eth_logs() -> Result<()> {
+    async fn test_eth_logs_number() -> Result<()> {
         // check how to use eth logs
         let stream = test_stream().await?;
-        let web3 = stream.http_web3()?;
-        let event = erc20_transfer()?;
-        let sig = event.signature();
-        // we use alchemy link and they are gigachads that do not allow ranges bigger than 2k
-        // hence motivation for this entire lib
-        let filter = FilterBuilder::default()
-            .address(vec![stream.contract_address])
-            .from_block(BlockNumber::Number(stream.from_block))
-            // just get 10 blocks to make sure this returns
-            .to_block(BlockNumber::Number(stream.from_block + U64::from(10u64)))
-            .topics(
-                Some(vec![H256::from_slice(sig.as_bytes())]),
-                None,
-                None,
-                None,
-            )
-            .build();
+        let (snd, mut rx) = broadcast::channel(1000);
 
-        let logs = web3.eth().logs(filter).await?;
-        assert_eq!(logs.len(), 59);
+        // run it as a separate task
+        tokio::spawn(async move { stream.block_stream(snd).await });
+
+        let mut item = rx.recv().await;
+
+        let mut all_logs = Vec::new();
+
+        if !item.is_ok() {
+            return Err(anyhow::anyhow!("No logs returned"));
+        }
+
+        while item.is_ok() {
+            let (_block_number, mut block_logs) = item?;
+            all_logs.append(block_logs.borrow_mut());
+            // consoom the message
+            item = rx.recv().await;
+        }
+        // if it reaches here it means the stream ended
+
+        assert_eq!(all_logs.len(), 59);
         Ok(())
     }
 }
