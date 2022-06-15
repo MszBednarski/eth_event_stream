@@ -4,6 +4,7 @@ use anyhow::Result;
 use ethabi::Event;
 use rich_log::{MakesRichLog, RichLog};
 use tokio::sync::broadcast;
+use web3::transports::Http;
 use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H160, H256, U256, U64};
 use web3::{api, transports, Web3};
 
@@ -24,7 +25,9 @@ pub struct Stream {
     pub from_block: U64,
     pub to_block: U64,
     pub event: Event,
-    filter: Filter,
+    /// used for the filter builder
+    f_contract_address: Vec<Address>,
+    f_topic: Option<Vec<H256>>,
     mode: StreamMode,
 }
 
@@ -34,6 +37,17 @@ impl Stream {
         Ok(Web3::new(transport))
     }
 
+    /// builds filter for one time call to eth.logs
+    fn build_filter(&self, from_block: U64, to_block: U64) -> Filter {
+        FilterBuilder::default()
+            .address(self.f_contract_address.clone())
+            .from_block(BlockNumber::Number(from_block))
+            // just get 10 blocks to make sure this returns
+            .to_block(BlockNumber::Number(to_block))
+            .topics(self.f_topic.clone(), None, None, None)
+            .build()
+    }
+
     pub async fn new(
         http_url: String,
         contract_address: Address,
@@ -41,18 +55,8 @@ impl Stream {
         to_block: U64,
         event: Event,
     ) -> Result<Stream> {
-        let filter = FilterBuilder::default()
-            .address(vec![contract_address])
-            .from_block(BlockNumber::Number(from_block))
-            // just get 10 blocks to make sure this returns
-            .to_block(BlockNumber::Number(to_block))
-            .topics(
-                Some(vec![H256::from_slice(event.signature().as_bytes())]),
-                None,
-                None,
-                None,
-            )
-            .build();
+        let f_contract_address = vec![contract_address];
+        let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let mut s = Stream {
             http_url,
             contract_address,
@@ -61,8 +65,9 @@ impl Stream {
             // I found that 2 block delay usually feeds reliably
             confirmation_blocks: 2u8,
             mode: StreamMode::HistoricalStream,
-            filter,
             event,
+            f_contract_address,
+            f_topic,
         };
         let web3 = s.http_web3()?;
         // set the stream mode to live or historical
@@ -75,6 +80,23 @@ impl Stream {
         Ok(s)
     }
 
+    /// this cannot get you logs on arbitrary range
+    /// if you use
+    pub async fn get_logs(
+        &self,
+        web3: web3::api::Web3<Http>,
+        from_block: U64,
+        to_block: U64,
+    ) -> Result<Vec<RichLog>> {
+        let filter = self.build_filter(from_block, to_block);
+        let logs = web3.eth().logs(filter).await?;
+        let parsed_log: Vec<RichLog> = logs
+            .iter()
+            .map(|l| l.make_rich_log(&self.event).unwrap())
+            .collect();
+        Ok(parsed_log)
+    }
+
     /// uses parameter sender to send blocks of eth logs to all recievers
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
@@ -85,13 +107,8 @@ impl Stream {
         // we use alchemy and they are gigachads that do not allow ranges bigger than 2k on the eth.logs call
         // hence motivation for this entire lib
         let web3 = self.http_web3()?;
-        let filter = self.filter.clone();
-        let logs = web3.eth().logs(filter).await?;
-        let parsed_log_results: Vec<RichLog> = logs
-            .iter()
-            .map(|l| l.make_rich_log(&self.event).unwrap())
-            .collect();
-        sender.send((BlockNumber::from(9i8), parsed_log_results))?;
+        let logs = self.get_logs(web3, self.from_block, self.to_block).await?;
+        sender.send((BlockNumber::from(9i8), logs))?;
         Ok(())
     }
 }
@@ -135,7 +152,6 @@ mod test {
         // check how to use eth logs
         let stream = test_stream().await?;
         let (snd, mut rx) = broadcast::channel(1000);
-
         // run it as a separate task
         tokio::spawn(async move { stream.block_stream(snd).await });
 
