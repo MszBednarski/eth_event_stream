@@ -1,5 +1,7 @@
 mod events;
 mod rich_log;
+use std::cmp::Ordering;
+
 use anyhow::Result;
 use ethabi::Event;
 use rich_log::{MakesRichLog, RichLog};
@@ -81,7 +83,8 @@ impl Stream {
     }
 
     /// this cannot get you logs on arbitrary range
-    /// if you use
+    /// this does just one call to eth.logs
+    /// sorts logs in ascending order the way they were emmited
     pub async fn get_logs(
         &self,
         web3: web3::api::Web3<Http>,
@@ -90,10 +93,17 @@ impl Stream {
     ) -> Result<Vec<RichLog>> {
         let filter = self.build_filter(from_block, to_block);
         let logs = web3.eth().logs(filter).await?;
-        let parsed_log: Vec<RichLog> = logs
+        let mut parsed_log: Vec<RichLog> = logs
             .iter()
             .map(|l| l.make_rich_log(&self.event).unwrap())
             .collect();
+        parsed_log.sort_by(|a, b| match a.log_index > b.log_index {
+            true => Ordering::Greater,
+            false => match a.log_index == b.log_index {
+                true => Ordering::Equal,
+                false => Ordering::Less,
+            },
+        });
         Ok(parsed_log)
     }
 
@@ -116,11 +126,11 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
-    use crate::events::erc20_transfer;
+    use crate::{events::erc20_transfer, rich_log::RichLog};
     use anyhow::Result;
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
-    use web3::types::{Address, BlockNumber, FilterBuilder, H256, U64};
+    use web3::types::{Address, BlockNumber, FilterBuilder, H256, U256, U64};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
@@ -132,6 +142,16 @@ mod test {
         let to_block = from_block + U64::from(10u64);
         let event = erc20_transfer()?;
         Stream::new(http_url, contract_address, from_block, to_block, event).await
+    }
+
+    fn test_ordering(logs: Vec<RichLog>) {
+        logs.iter()
+            .map(|l| l.log_index.as_u128() as i128)
+            // verify ordering of the logs
+            .fold(-1i128, |prev, item| {
+                assert!(item > prev);
+                item
+            });
     }
 
     #[test]
@@ -172,6 +192,8 @@ mod test {
         // if it reaches here it means the stream ended
 
         assert_eq!(all_logs.len(), 59);
+        test_ordering(all_logs);
+
         Ok(())
     }
 }
