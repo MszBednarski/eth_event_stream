@@ -106,7 +106,7 @@ impl Stream {
     /// in the blockchain EVM
     pub async fn block_stream(
         &self,
-        sender: broadcast::Sender<(BlockNumber, Vec<RichLog>)>,
+        sender: broadcast::Sender<(U64, Vec<RichLog>)>,
     ) -> Result<()> {
         // we use alchemy and they are gigachads that do not allow ranges bigger than 2k on the eth.logs call
         // hence motivation for this entire lib
@@ -179,7 +179,8 @@ mod test {
         }
 
         while item.is_ok() {
-            let (_block_number, mut block_logs) = item?;
+            let (block_number, mut block_logs) = item?;
+            println!("Got block {} size {}", block_number, block_logs.len());
             test_ordering(&block_logs);
             all_logs.append(block_logs.borrow_mut());
             // consoom the message

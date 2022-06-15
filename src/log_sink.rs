@@ -2,7 +2,7 @@ use crate::rich_log::RichLog;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use tokio::sync::broadcast;
-use web3::types::{BlockNumber, U256, U64};
+use web3::types::{U256, U64};
 
 /// Stores RichLogs in a datastructure optimized for flushing logs,
 /// once we are sure that they are finalized based on confirmation_blocks number.
@@ -10,16 +10,13 @@ pub struct LogSink {
     confirmation_blocks: u8,
     // block number -> log index -> log
     log_store: BTreeMap<U64, BTreeMap<U256, RichLog>>,
-    sender: broadcast::Sender<(BlockNumber, Vec<RichLog>)>,
+    sender: broadcast::Sender<(U64, Vec<RichLog>)>,
     min_block: U64,
     max_block: U64,
 }
 
 impl LogSink {
-    pub fn new(
-        sender: broadcast::Sender<(BlockNumber, Vec<RichLog>)>,
-        confirmation_blocks: u8,
-    ) -> Self {
+    pub fn new(sender: broadcast::Sender<(U64, Vec<RichLog>)>, confirmation_blocks: u8) -> Self {
         let log_store: BTreeMap<U64, BTreeMap<U256, RichLog>> = BTreeMap::new();
         LogSink {
             confirmation_blocks,
@@ -40,13 +37,12 @@ impl LogSink {
             match self.log_store.get_mut(&block_number_) {
                 Some(entry) => {
                     // here we aim to flush and delete the entry
-                    let msg_block_number = BlockNumber::from(block_number);
                     // already sorted logs due to the btreemap
                     let logs = entry.values().cloned().collect();
                     // delete the entry
                     self.log_store.remove(&block_number_);
                     // send it to the consoomers
-                    self.sender.send((msg_block_number, logs))?;
+                    self.sender.send((block_number_, logs))?;
                 }
                 None => {} // do nothing
             }
@@ -83,29 +79,48 @@ impl LogSink {
             RichLog {
                 block_number,
                 log_index,
+                removed,
                 ..
-            } => {
-                // keep track of min/max block
-                if block_number > self.max_block {
-                    self.max_block = block_number
-                }
-                if block_number < self.min_block {
-                    self.min_block = block_number
-                }
-                // insert
-                match self.log_store.get_mut(&block_number) {
-                    Some(entry) => {
-                        // put log to existing block
-                        entry.insert(log_index, log);
-                    }
-                    None => {
-                        // just make a new entry
-                        let mut map = BTreeMap::new();
-                        map.insert(log_index, log);
-                        self.log_store.insert(block_number, map);
+            } => match removed {
+                true => {
+                    // if log is removed we need to make sure we don't have it in our datastructure
+                    match self.log_store.get_mut(&block_number) {
+                        Some(entry) => {
+                            // check if entry exists
+                            match entry.get(&log_index) {
+                                Some(_) => {
+                                    // delete it from our datastructure
+                                    entry.remove(&log_index);
+                                }
+                                None => {} // do nothing
+                            }
+                        }
+                        None => {} // do nothing
                     }
                 }
-            }
+                false => {
+                    // keep track of min/max block
+                    if block_number > self.max_block {
+                        self.max_block = block_number
+                    }
+                    if block_number < self.min_block {
+                        self.min_block = block_number
+                    }
+                    // insert
+                    match self.log_store.get_mut(&block_number) {
+                        Some(entry) => {
+                            // put log to existing block
+                            entry.insert(log_index, log);
+                        }
+                        None => {
+                            // just make a new entry
+                            let mut map = BTreeMap::new();
+                            map.insert(log_index, log);
+                            self.log_store.insert(block_number, map);
+                        }
+                    }
+                }
+            },
         }
     }
 }
