@@ -7,13 +7,15 @@ use ethabi::Event;
 use log_sink::LogSink;
 use rich_log::{MakesRichLog, RichLog};
 use tokio::sync::broadcast;
+use web3::futures::TryStreamExt;
 use web3::transports::Http;
-use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H160, H256, U256, U64};
+use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H256, U64};
 use web3::{api, transports, Web3};
 
 #[derive(Debug)]
 pub struct Stream {
     pub http_url: String,
+    pub ws_url: String,
     pub contract_address: Address,
     pub confirmation_blocks: u8,
     pub from_block: U64,
@@ -30,6 +32,11 @@ impl Stream {
         Ok(Web3::new(transport))
     }
 
+    pub async fn ws_web3(&self) -> Result<api::Web3<web3::transports::WebSocket>> {
+        let transport = transports::WebSocket::new(&self.ws_url).await?;
+        Ok(Web3::new(transport))
+    }
+
     /// builds filter for one time call to eth.logs
     fn build_filter(&self, from_block: U64, to_block: U64) -> Filter {
         FilterBuilder::default()
@@ -43,6 +50,7 @@ impl Stream {
 
     pub async fn new(
         http_url: String,
+        ws_url: String,
         contract_address: Address,
         from_block: U64,
         to_block: U64,
@@ -52,6 +60,7 @@ impl Stream {
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let s = Stream {
             http_url,
+            ws_url,
             contract_address,
             from_block,
             to_block,
@@ -86,7 +95,7 @@ impl Stream {
     /// streams it through sender to consoomers
     async fn stream_historical_logs(
         &self,
-        sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
         from_block: U64,
         to_block: U64,
         block_step: u64,
@@ -101,9 +110,52 @@ impl Stream {
                 end = to_block
             }
             sink.put_logs(self.get_logs(&web3, start, end).await?)?;
-            start = start + block_step + 1;
+            start = start + block_step + 1u64;
         }
-        sink.flush_remaining()?;
+        sink.flush_remaining()
+    }
+
+    /// streams live blocks from_block inclusive
+    async fn stream_live_logs(
+        &self,
+        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
+        from_block: U64,
+        to_block: U64,
+    ) -> Result<()> {
+        let web3 = self.http_web3()?;
+        let mut sink = LogSink::new(sender, self.confirmation_blocks);
+        let (block_sender, mut block_receiver) = broadcast::channel(100);
+        let ws_web3 = self.ws_web3().await?;
+        // send new block numbers to the block_receiver
+        tokio::spawn(async move {
+            let mut subscription = ws_web3.eth_subscribe().subscribe_new_heads().await.unwrap();
+            loop {
+                let block = subscription.try_next().await;
+                if block.is_ok() {
+                    let unwraped = block.unwrap();
+                    let block_number = unwraped.unwrap().number.unwrap();
+                    block_sender.send(block_number).unwrap();
+                }
+            }
+        });
+
+        let mut get_from = from_block;
+        #[allow(irrefutable_let_patterns)]
+        while let cur_block = block_receiver.recv().await? {
+            let mut safe_block = cur_block - self.confirmation_blocks;
+            if safe_block > to_block {
+                safe_block = to_block;
+            }
+            if safe_block > get_from {
+                sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?)?;
+                // set new get from block
+                get_from = safe_block + 1u64;
+                // this is the end
+                if safe_block == to_block {
+                    return Ok(());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -112,7 +164,7 @@ impl Stream {
     /// in the blockchain EVM
     pub async fn block_stream(
         &self,
-        sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
         block_step: u64,
     ) -> Result<()> {
         let web3 = self.http_web3()?;
@@ -126,6 +178,13 @@ impl Stream {
         }
         self.stream_historical_logs(sender, self.from_block, safe_last_historical, block_step)
             .await?;
+
+        let new_from = safe_last_historical + 1u64;
+        if new_from < self.to_block {
+            // stream
+            self.stream_live_logs(sender, new_from, self.to_block)
+                .await?;
+        }
         Ok(())
     }
 }
@@ -137,18 +196,27 @@ mod test {
     use anyhow::Result;
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
-    use web3::types::{Address, BlockNumber, FilterBuilder, H256, U256, U64};
+    use web3::types::{Address, U64};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
     async fn test_stream() -> Result<Stream> {
         let http_url = env::var("HTTP_NODE_URL")?;
+        let ws_url = env::var("WS_NODE_URL")?;
         let contract_address = Address::from_slice(hex::decode(USDC)?.as_slice());
         let from_block = U64::from(14658323u64);
         // from + 10
         let to_block = from_block + U64::from(10u64);
         let event = erc20_transfer()?;
-        Stream::new(http_url, contract_address, from_block, to_block, event).await
+        Stream::new(
+            http_url,
+            ws_url,
+            contract_address,
+            from_block,
+            to_block,
+            event,
+        )
+        .await
     }
 
     fn test_ordering(logs: &Vec<RichLog>) {
@@ -180,7 +248,7 @@ mod test {
         let stream = test_stream().await?;
         let (snd, mut rx) = broadcast::channel(1000);
         // run it as a separate task
-        tokio::spawn(async move { stream.block_stream(snd, 2).await });
+        tokio::spawn(async move { stream.block_stream(&snd, 2).await });
 
         let mut item = rx.recv().await;
 

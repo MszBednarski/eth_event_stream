@@ -49,7 +49,7 @@ impl MakesRichLog for web3::types::Log {
 
 #[cfg(test)]
 mod test {
-    use super::{MakesRichLog, RichLog};
+    use super::MakesRichLog;
     use crate::events::erc20_transfer;
     use anyhow::Result;
     use web3::types::{Address, Bytes, Log, H256, U256, U64};

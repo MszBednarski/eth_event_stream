@@ -6,17 +6,20 @@ use web3::types::{U256, U64};
 
 /// Stores RichLogs in a datastructure optimized for flushing logs,
 /// once we are sure that they are finalized based on confirmation_blocks number.
-pub struct LogSink {
+pub struct LogSink<'a> {
     confirmation_blocks: u8,
     // block number -> log index -> log
     log_store: BTreeMap<U64, BTreeMap<U256, RichLog>>,
-    sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+    sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>,
     min_block: U64,
     max_block: U64,
 }
 
-impl LogSink {
-    pub fn new(sender: broadcast::Sender<(U64, Vec<RichLog>)>, confirmation_blocks: u8) -> Self {
+impl<'a> LogSink<'a> {
+    pub fn new(
+        sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>,
+        confirmation_blocks: u8,
+    ) -> Self {
         let log_store: BTreeMap<U64, BTreeMap<U256, RichLog>> = BTreeMap::new();
         LogSink {
             confirmation_blocks,
