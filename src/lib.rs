@@ -1,36 +1,11 @@
+mod events;
+mod rich_log;
 use anyhow::Result;
-use ethabi::{Event, EventParam, ParamType};
+use ethabi::Event;
+use rich_log::{MakesRichLog, RichLog};
 use tokio::sync::broadcast;
-use web3::types::{Address, BlockNumber, Filter, FilterBuilder, Log, H256, U64};
+use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H160, H256, U256, U64};
 use web3::{api, transports, Web3};
-
-/// returns the erc20 transfer event
-/// "event Transfer(address indexed from, address indexed to, uint value)"
-pub fn erc20_transfer() -> Result<Event> {
-    let params = vec![
-        EventParam {
-            name: "from".to_string(),
-            kind: ParamType::Address,
-            indexed: true,
-        },
-        EventParam {
-            name: "to".to_string(),
-            kind: ParamType::Address,
-            indexed: true,
-        },
-        EventParam {
-            name: "value".to_string(),
-            kind: ParamType::Uint(256),
-            indexed: false,
-        },
-    ];
-    let event = Event {
-        name: "Transfer".to_string(),
-        inputs: params,
-        anonymous: false,
-    };
-    Ok(event)
-}
 
 #[derive(Debug)]
 enum StreamMode {
@@ -105,23 +80,27 @@ impl Stream {
     /// in the blockchain EVM
     pub async fn block_stream(
         &self,
-        sender: broadcast::Sender<(BlockNumber, Vec<Log>)>,
+        sender: broadcast::Sender<(BlockNumber, Vec<RichLog>)>,
     ) -> Result<()> {
         // we use alchemy and they are gigachads that do not allow ranges bigger than 2k on the eth.logs call
         // hence motivation for this entire lib
         let web3 = self.http_web3()?;
         let filter = self.filter.clone();
         let logs = web3.eth().logs(filter).await?;
-        sender.send((BlockNumber::from(9), logs))?;
+        let parsed_log_results: Vec<RichLog> = logs
+            .iter()
+            .map(|l| l.make_rich_log(&self.event).unwrap())
+            .collect();
+        sender.send((BlockNumber::from(9i8), parsed_log_results))?;
         Ok(())
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{erc20_transfer, Stream};
+mod test {
+    use super::Stream;
+    use crate::events::erc20_transfer;
     use anyhow::Result;
-    use ethabi::{Event, EventParam, ParamType};
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
     use web3::types::{Address, BlockNumber, FilterBuilder, H256, U64};
