@@ -1,6 +1,6 @@
-mod events;
+pub mod events;
 mod log_sink;
-mod rich_log;
+pub mod rich_log;
 
 use anyhow::Result;
 use ethabi::Event;
@@ -11,6 +11,16 @@ use web3::futures::TryStreamExt;
 use web3::transports::Http;
 use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H256, U64};
 use web3::{api, transports, Web3};
+
+pub fn http_web3(http_url: &str) -> Result<api::Web3<web3::transports::Http>> {
+    let transport = transports::Http::new(http_url)?;
+    Ok(Web3::new(transport))
+}
+
+pub async fn ws_web3(ws_url: &str) -> Result<api::Web3<web3::transports::WebSocket>> {
+    let transport = transports::WebSocket::new(ws_url).await?;
+    Ok(Web3::new(transport))
+}
 
 #[derive(Debug)]
 pub struct Stream {
@@ -27,16 +37,6 @@ pub struct Stream {
 }
 
 impl Stream {
-    pub fn http_web3(&self) -> Result<api::Web3<web3::transports::Http>> {
-        let transport = transports::Http::new(&self.http_url)?;
-        Ok(Web3::new(transport))
-    }
-
-    pub async fn ws_web3(&self) -> Result<api::Web3<web3::transports::WebSocket>> {
-        let transport = transports::WebSocket::new(&self.ws_url).await?;
-        Ok(Web3::new(transport))
-    }
-
     /// builds filter for one time call to eth.logs
     fn build_filter(&self, from_block: U64, to_block: U64) -> Filter {
         FilterBuilder::default()
@@ -52,8 +52,9 @@ impl Stream {
         http_url: String,
         ws_url: String,
         contract_address: Address,
-        from_block: U64,
-        to_block: U64,
+        from_block: u64,
+        to_block: u64,
+        confirmation_blocks: u8,
         event: Event,
     ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
@@ -62,10 +63,10 @@ impl Stream {
             http_url,
             ws_url,
             contract_address,
-            from_block,
-            to_block,
+            from_block: U64::from(from_block),
+            to_block: U64::from(to_block),
             // I found that 2 block delay usually feeds reliably
-            confirmation_blocks: 2u8,
+            confirmation_blocks,
             event,
             f_contract_address,
             f_topic,
@@ -100,8 +101,8 @@ impl Stream {
         to_block: U64,
         block_step: u64,
     ) -> Result<()> {
-        let web3 = self.http_web3()?;
-        let mut sink = LogSink::new(sender, 0);
+        let web3 = http_web3(&self.http_url)?;
+        let mut sink = LogSink::new(sender);
         // get in batches of size block_step
         let mut start = from_block;
         while start < to_block {
@@ -122,10 +123,10 @@ impl Stream {
         from_block: U64,
         to_block: U64,
     ) -> Result<()> {
-        let web3 = self.http_web3()?;
-        let mut sink = LogSink::new(sender, self.confirmation_blocks);
+        let web3 = http_web3(&self.http_url)?;
+        let mut sink = LogSink::new(sender);
         let (block_sender, mut block_receiver) = broadcast::channel(100);
-        let ws_web3 = self.ws_web3().await?;
+        let ws_web3 = ws_web3(&self.ws_url).await?;
         // send new block numbers to the block_receiver
         tokio::spawn(async move {
             let mut subscription = ws_web3.eth_subscribe().subscribe_new_heads().await.unwrap();
@@ -140,8 +141,8 @@ impl Stream {
         });
 
         let mut get_from = from_block;
-        #[allow(irrefutable_let_patterns)]
-        while let cur_block = block_receiver.recv().await? {
+        loop {
+            let cur_block = block_receiver.recv().await?;
             let mut safe_block = cur_block - self.confirmation_blocks;
             if safe_block > to_block {
                 safe_block = to_block;
@@ -152,11 +153,10 @@ impl Stream {
                 get_from = safe_block + 1u64;
                 // this is the end
                 if safe_block == to_block {
-                    return Ok(());
+                    return sink.flush_remaining();
                 }
             }
         }
-        Ok(())
     }
 
     /// uses parameter sender to send blocks of eth logs to all recievers
@@ -167,7 +167,7 @@ impl Stream {
         sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
         block_step: u64,
     ) -> Result<()> {
-        let web3 = self.http_web3()?;
+        let web3 = http_web3(&self.http_url)?;
         // set the stream mode to live or historical
         // based on the users request
         let cur_block_number = web3.eth().block_number().await?;
@@ -181,6 +181,7 @@ impl Stream {
 
         let new_from = safe_last_historical + 1u64;
         if new_from < self.to_block {
+            println!("Streaming live");
             // stream
             self.stream_live_logs(sender, new_from, self.to_block)
                 .await?;
@@ -196,7 +197,7 @@ mod test {
     use anyhow::Result;
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
-    use web3::types::{Address, U64};
+    use web3::types::Address;
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
@@ -204,9 +205,10 @@ mod test {
         let http_url = env::var("HTTP_NODE_URL")?;
         let ws_url = env::var("WS_NODE_URL")?;
         let contract_address = Address::from_slice(hex::decode(USDC)?.as_slice());
-        let from_block = U64::from(14658323u64);
+        let from_block = 14658323u64;
         // from + 10
-        let to_block = from_block + U64::from(10u64);
+        let to_block = from_block + 10;
+        let confirmation_blocks = 2u8;
         let event = erc20_transfer()?;
         Stream::new(
             http_url,
@@ -214,6 +216,7 @@ mod test {
             contract_address,
             from_block,
             to_block,
+            confirmation_blocks,
             event,
         )
         .await

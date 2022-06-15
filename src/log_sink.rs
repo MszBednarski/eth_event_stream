@@ -5,9 +5,8 @@ use tokio::sync::broadcast;
 use web3::types::{U256, U64};
 
 /// Stores RichLogs in a datastructure optimized for flushing logs,
-/// once we are sure that they are finalized based on confirmation_blocks number.
+/// once we are sure that they are finalized
 pub struct LogSink<'a> {
-    confirmation_blocks: u8,
     // block number -> log index -> log
     log_store: BTreeMap<U64, BTreeMap<U256, RichLog>>,
     sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>,
@@ -16,13 +15,9 @@ pub struct LogSink<'a> {
 }
 
 impl<'a> LogSink<'a> {
-    pub fn new(
-        sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>,
-        confirmation_blocks: u8,
-    ) -> Self {
+    pub fn new(sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>) -> Self {
         let log_store: BTreeMap<U64, BTreeMap<U256, RichLog>> = BTreeMap::new();
         LogSink {
-            confirmation_blocks,
             log_store,
             sender,
             min_block: U64::MAX,
@@ -65,7 +60,7 @@ impl<'a> LogSink<'a> {
             }
             // since logs.len > 0 we can safely flush
             // flush only finalized
-            let flush_up_to = self.max_block - self.confirmation_blocks;
+            let flush_up_to = self.max_block - 1;
             self.flush_blocks_range(self.min_block, flush_up_to)?
         }
         Ok(())
