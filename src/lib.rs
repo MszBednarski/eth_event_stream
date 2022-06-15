@@ -1,9 +1,10 @@
 mod events;
+mod log_sink;
 mod rich_log;
-use std::cmp::Ordering;
 
 use anyhow::Result;
 use ethabi::Event;
+use log_sink::LogSink;
 use rich_log::{MakesRichLog, RichLog};
 use tokio::sync::broadcast;
 use web3::transports::Http;
@@ -93,17 +94,10 @@ impl Stream {
     ) -> Result<Vec<RichLog>> {
         let filter = self.build_filter(from_block, to_block);
         let logs = web3.eth().logs(filter).await?;
-        let mut parsed_log: Vec<RichLog> = logs
+        let parsed_log: Vec<RichLog> = logs
             .iter()
             .map(|l| l.make_rich_log(&self.event).unwrap())
             .collect();
-        parsed_log.sort_by(|a, b| match a.log_index > b.log_index {
-            true => Ordering::Greater,
-            false => match a.log_index == b.log_index {
-                true => Ordering::Equal,
-                false => Ordering::Less,
-            },
-        });
         Ok(parsed_log)
     }
 
@@ -117,9 +111,10 @@ impl Stream {
         // we use alchemy and they are gigachads that do not allow ranges bigger than 2k on the eth.logs call
         // hence motivation for this entire lib
         let web3 = self.http_web3()?;
+        let mut sink = LogSink::new(sender, self.confirmation_blocks);
         let logs = self.get_logs(web3, self.from_block, self.to_block).await?;
-        sender.send((BlockNumber::from(9i8), logs))?;
-        Ok(())
+        sink.put_logs(logs)?;
+        sink.flush_remaining()
     }
 }
 
@@ -144,7 +139,7 @@ mod test {
         Stream::new(http_url, contract_address, from_block, to_block, event).await
     }
 
-    fn test_ordering(logs: Vec<RichLog>) {
+    fn test_ordering(logs: &Vec<RichLog>) {
         logs.iter()
             .map(|l| l.log_index.as_u128() as i128)
             // verify ordering of the logs
@@ -185,6 +180,7 @@ mod test {
 
         while item.is_ok() {
             let (_block_number, mut block_logs) = item?;
+            test_ordering(&block_logs);
             all_logs.append(block_logs.borrow_mut());
             // consoom the message
             item = rx.recv().await;
@@ -192,7 +188,6 @@ mod test {
         // if it reaches here it means the stream ended
 
         assert_eq!(all_logs.len(), 59);
-        test_ordering(all_logs);
 
         Ok(())
     }
