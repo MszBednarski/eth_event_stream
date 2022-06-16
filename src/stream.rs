@@ -22,21 +22,20 @@ pub async fn ws_web3(ws_url: &str) -> Result<api::Web3<web3::transports::WebSock
 }
 
 #[derive(Debug)]
-pub struct Stream<T = RichLog> {
+pub struct Stream {
     pub http_url: String,
     pub ws_url: String,
     pub contract_address: Address,
     pub confirmation_blocks: u8,
     pub from_block: U64,
     pub to_block: U64,
-    adapter: fn(RichLog) -> T,
     event: Event,
     /// used for the filter builder
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
 }
 
-impl<T: std::fmt::Debug + std::marker::Send + std::marker::Sync + 'static> Stream<T> {
+impl Stream {
     /// builds filter for one time call to eth.logs
     fn build_filter(&self, from_block: U64, to_block: U64) -> Filter {
         FilterBuilder::default()
@@ -56,8 +55,7 @@ impl<T: std::fmt::Debug + std::marker::Send + std::marker::Sync + 'static> Strea
         to_block: u64,
         confirmation_blocks: u8,
         event_declaration: &'static str,
-        adapter: fn(RichLog) -> T,
-    ) -> Result<Stream<T>> {
+    ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
@@ -72,7 +70,6 @@ impl<T: std::fmt::Debug + std::marker::Send + std::marker::Sync + 'static> Strea
             event,
             f_contract_address,
             f_topic,
-            adapter,
         };
         Ok(s)
     }
@@ -241,7 +238,6 @@ mod test {
             to_block,
             confirmation_blocks,
             "event Transfer(address indexed from, address indexed to, uint value)",
-            |a| a,
         )
         .await
     }
