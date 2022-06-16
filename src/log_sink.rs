@@ -1,35 +1,32 @@
 use crate::rich_log::RichLog;
-use anyhow::Result;
 use std::collections::BTreeMap;
-use tokio::sync::broadcast;
 use web3::types::{U256, U64};
 
 /// Stores RichLogs in a datastructure optimized for flushing logs,
 /// once we are sure that they are finalized
-pub struct LogSink<'a> {
+pub struct LogSink {
     // block number -> log index -> log
     log_store: BTreeMap<U64, BTreeMap<U256, RichLog>>,
-    sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>,
     min_block: U64,
     max_block: U64,
 }
 
-impl<'a> LogSink<'a> {
-    pub fn new(sender: &'a broadcast::Sender<(U64, Vec<RichLog>)>) -> Self {
+impl LogSink {
+    pub fn new() -> Self {
         let log_store: BTreeMap<U64, BTreeMap<U256, RichLog>> = BTreeMap::new();
         LogSink {
             log_store,
-            sender,
             min_block: U64::MAX,
             max_block: U64::from(0u8),
         }
     }
 
     /// flushes block range inclusive
-    fn flush_blocks_range(&mut self, from: U64, to: U64) -> Result<()> {
+    fn flush_blocks_range(&mut self, from: U64, to: U64) -> Vec<(U64, Vec<RichLog>)> {
         let from_u64 = from.as_u64();
         // range is inclusive
         let up_to_u64 = to.as_u64() + 1;
+        let mut to_send = Vec::new();
         for block_number in from_u64..up_to_u64 {
             let block_number_ = U64::from(block_number);
             match self.log_store.get_mut(&block_number_) {
@@ -40,7 +37,7 @@ impl<'a> LogSink<'a> {
                     // delete the entry
                     self.log_store.remove(&block_number_);
                     // send it to the consoomers
-                    self.sender.send((block_number_, logs))?;
+                    to_send.push((block_number_, logs));
                 }
                 None => {} // do nothing
             }
@@ -48,12 +45,12 @@ impl<'a> LogSink<'a> {
         // set min blocks to valid value
         self.min_block = to + 1;
         // max does not need to be updated because it always leads
-        Ok(())
+        to_send
     }
 
     /// puts multiple logs into the datastructure then
     /// flushes the finalized ones
-    pub fn put_logs(&mut self, logs: Vec<RichLog>) -> Result<()> {
+    pub fn put_logs(&mut self, logs: Vec<RichLog>) -> Vec<(U64, Vec<RichLog>)> {
         if logs.len() > 0 {
             for log in logs {
                 self.put_log(log)
@@ -61,13 +58,13 @@ impl<'a> LogSink<'a> {
             // since logs.len > 0 we can safely flush
             // flush only finalized
             let flush_up_to = self.max_block - 1;
-            self.flush_blocks_range(self.min_block, flush_up_to)?
+            return self.flush_blocks_range(self.min_block, flush_up_to);
         }
-        Ok(())
+        Vec::new()
     }
 
-    pub fn flush_remaining(&mut self) -> Result<()> {
-        self.flush_blocks_range(self.min_block, self.max_block)
+    pub fn flush_remaining(&mut self) -> Vec<(U64, Vec<RichLog>)> {
+        return self.flush_blocks_range(self.min_block, self.max_block);
     }
 
     /// puts one log into the datastructure

@@ -104,7 +104,7 @@ impl Stream {
         block_step: u64,
     ) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
-        let mut sink = LogSink::new(sender);
+        let mut sink = LogSink::new();
         // get in batches of size block_step
         let mut start = from_block;
         while start < to_block {
@@ -112,10 +112,15 @@ impl Stream {
             if end > to_block {
                 end = to_block
             }
-            sink.put_logs(self.get_logs(&web3, start, end).await?)?;
+            for l in sink.put_logs(self.get_logs(&web3, start, end).await?) {
+                sender.send(l)?;
+            }
             start = start + block_step + 1u64;
         }
-        sink.flush_remaining()
+        for l in sink.flush_remaining() {
+            sender.send(l)?;
+        }
+        Ok(())
     }
 
     /// streams live blocks from_block inclusive
@@ -126,7 +131,7 @@ impl Stream {
         to_block: U64,
     ) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
-        let mut sink = LogSink::new(sender);
+        let mut sink = LogSink::new();
         let (block_sender, mut block_receiver) = broadcast::channel(100);
         let ws_web3 = ws_web3(&self.ws_url).await?;
         // send new block numbers to the block_receiver
@@ -150,12 +155,17 @@ impl Stream {
                 safe_block = to_block;
             }
             if safe_block > get_from {
-                sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?)?;
+                for l in sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?) {
+                    sender.send(l)?;
+                }
                 // set new get from block
                 get_from = safe_block + 1u64;
                 // this is the end
                 if safe_block == to_block {
-                    return sink.flush_remaining();
+                    for l in sink.flush_remaining() {
+                        sender.send(l)?;
+                    }
+                    return Ok(());
                 }
             }
         }
