@@ -29,6 +29,8 @@ pub struct Stream {
     pub confirmation_blocks: u8,
     pub from_block: U64,
     pub to_block: U64,
+    block_step: u64,
+    sender: broadcast::Sender<(U64, Vec<RichLog>)>,
     event: Event,
     /// used for the filter builder
     f_contract_address: Vec<Address>,
@@ -55,11 +57,15 @@ impl Stream {
         to_block: u64,
         confirmation_blocks: u8,
         event_declaration: &'static str,
+        sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+        block_step: u64,
     ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let s = Stream {
+            sender,
+            block_step,
             http_url,
             ws_url,
             contract_address,
@@ -74,13 +80,9 @@ impl Stream {
         Ok(s)
     }
 
-    async fn publish_blocks(
-        &self,
-        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
-        blocks: Vec<(U64, Vec<RichLog>)>,
-    ) -> Result<()> {
+    async fn publish_blocks(&self, blocks: Vec<(U64, Vec<RichLog>)>) -> Result<()> {
         for l in blocks {
-            sender.send(l)?;
+            self.sender.send(l)?;
         }
         Ok(())
     }
@@ -105,40 +107,26 @@ impl Stream {
 
     /// gets logs that are old enough to be finalized for sure
     /// streams it through sender to consoomers
-    async fn stream_historical_logs(
-        &self,
-        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
-        from_block: U64,
-        to_block: U64,
-        block_step: u64,
-    ) -> Result<()> {
+    async fn stream_historical_logs(&self, from_block: U64, to_block: U64) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
         let mut sink = LogSink::new();
         // get in batches of size block_step
         let mut start = from_block;
         while start < to_block {
-            let mut end = start + block_step;
+            let mut end = start + self.block_step;
             if end > to_block {
                 end = to_block
             }
-            self.publish_blocks(
-                sender,
-                sink.put_logs(self.get_logs(&web3, start, end).await?),
-            )
-            .await?;
-            start = start + block_step + 1u64;
+            self.publish_blocks(sink.put_logs(self.get_logs(&web3, start, end).await?))
+                .await?;
+            start = start + self.block_step + 1u64;
         }
-        self.publish_blocks(sender, sink.flush_remaining()).await?;
+        self.publish_blocks(sink.flush_remaining()).await?;
         Ok(())
     }
 
     /// streams live blocks from_block inclusive
-    async fn stream_live_logs(
-        &self,
-        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
-        from_block: U64,
-        to_block: U64,
-    ) -> Result<()> {
+    async fn stream_live_logs(&self, from_block: U64, to_block: U64) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
         let mut sink = LogSink::new();
         let (block_sender, mut block_receiver) = broadcast::channel(100);
@@ -165,7 +153,6 @@ impl Stream {
             }
             if safe_block > get_from {
                 self.publish_blocks(
-                    sender,
                     sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?),
                 )
                 .await?;
@@ -173,7 +160,7 @@ impl Stream {
                 get_from = safe_block + 1u64;
                 // this is the end
                 if safe_block == to_block {
-                    self.publish_blocks(sender, sink.flush_remaining()).await?;
+                    self.publish_blocks(sink.flush_remaining()).await?;
                     return Ok(());
                 }
             }
@@ -183,11 +170,7 @@ impl Stream {
     /// uses parameter sender to send blocks of eth logs to all recievers
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
-    pub async fn block_stream(
-        &self,
-        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
-        block_step: u64,
-    ) -> Result<()> {
+    pub async fn block_stream(&self) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
         // set the stream mode to live or historical
         // based on the users request
@@ -197,15 +180,14 @@ impl Stream {
         if cur_block_number < self.to_block {
             safe_last_historical = cur_block_number - self.confirmation_blocks;
         }
-        self.stream_historical_logs(sender, self.from_block, safe_last_historical, block_step)
+        self.stream_historical_logs(self.from_block, safe_last_historical)
             .await?;
 
         let new_from = safe_last_historical + 1u64;
         if new_from < self.to_block {
             println!("Streaming live");
             // stream
-            self.stream_live_logs(sender, new_from, self.to_block)
-                .await?;
+            self.stream_live_logs(new_from, self.to_block).await?;
         }
         Ok(())
     }
@@ -222,7 +204,10 @@ mod test {
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    async fn test_stream() -> Result<Stream> {
+    async fn test_stream() -> Result<(
+        Stream,
+        broadcast::Receiver<(web3::types::U64, Vec<RichLog>)>,
+    )> {
         let http_url = env::var("HTTP_NODE_URL")?;
         let ws_url = env::var("WS_NODE_URL")?;
         let contract_address = Address::from_slice(hex::decode(USDC)?.as_slice());
@@ -230,16 +215,22 @@ mod test {
         // from + 10
         let to_block = from_block + 10;
         let confirmation_blocks = 2u8;
-        Stream::new(
-            http_url,
-            ws_url,
-            contract_address,
-            from_block,
-            to_block,
-            confirmation_blocks,
-            "event Transfer(address indexed from, address indexed to, uint value)",
-        )
-        .await
+        let (sender, rx) = broadcast::channel(1000);
+        Ok((
+            Stream::new(
+                http_url,
+                ws_url,
+                contract_address,
+                from_block,
+                to_block,
+                confirmation_blocks,
+                "event Transfer(address indexed from, address indexed to, uint value)",
+                sender,
+                2,
+            )
+            .await?,
+            rx,
+        ))
     }
 
     fn test_ordering(logs: &Vec<RichLog>) {
@@ -268,10 +259,9 @@ mod test {
     #[tokio::test]
     async fn test_eth_logs_number() -> Result<()> {
         // check how to use eth logs
-        let stream = test_stream().await?;
-        let (snd, mut rx) = broadcast::channel(1000);
+        let (stream, mut rx) = test_stream().await?;
         // run it as a separate task
-        tokio::spawn(async move { stream.block_stream(&snd, 2).await });
+        tokio::spawn(async move { stream.block_stream().await });
 
         let mut item = rx.recv().await;
 

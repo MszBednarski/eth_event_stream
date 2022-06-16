@@ -18,6 +18,8 @@ async fn main() -> anyhow::Result<()> {
         "Going to stream from block {} to {} inclusive",
         from_block, to_block
     );
+
+    let (sender, mut rx) = broadcast::channel(1000);
     let stream = Stream::new(
         http_url,
         ws_url,
@@ -26,11 +28,12 @@ async fn main() -> anyhow::Result<()> {
         to_block,
         confirmation_blocks,
         "event Transfer(address indexed from, address indexed to, uint value)",
+        sender,
+        5,
     )
     .await?;
 
-    let (snd, mut rx) = broadcast::channel(10);
-    tokio::spawn(async move { stream.block_stream(&snd, 5).await });
+    tokio::spawn(async move { stream.block_stream().await });
 
     loop {
         let block = rx.recv().await;
