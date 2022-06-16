@@ -22,20 +22,21 @@ pub async fn ws_web3(ws_url: &str) -> Result<api::Web3<web3::transports::WebSock
 }
 
 #[derive(Debug)]
-pub struct Stream {
+pub struct Stream<T = RichLog> {
     pub http_url: String,
     pub ws_url: String,
     pub contract_address: Address,
     pub confirmation_blocks: u8,
     pub from_block: U64,
     pub to_block: U64,
+    adapter: fn(RichLog) -> T,
     event: Event,
     /// used for the filter builder
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
 }
 
-impl Stream {
+impl<T: std::fmt::Debug + std::marker::Send + std::marker::Sync + 'static> Stream<T> {
     /// builds filter for one time call to eth.logs
     fn build_filter(&self, from_block: U64, to_block: U64) -> Filter {
         FilterBuilder::default()
@@ -55,7 +56,8 @@ impl Stream {
         to_block: u64,
         confirmation_blocks: u8,
         event_declaration: &'static str,
-    ) -> Result<Stream> {
+        adapter: fn(RichLog) -> T,
+    ) -> Result<Stream<T>> {
         let f_contract_address = vec![contract_address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
@@ -70,8 +72,20 @@ impl Stream {
             event,
             f_contract_address,
             f_topic,
+            adapter,
         };
         Ok(s)
+    }
+
+    async fn publish_blocks(
+        &self,
+        sender: &broadcast::Sender<(U64, Vec<RichLog>)>,
+        blocks: Vec<(U64, Vec<RichLog>)>,
+    ) -> Result<()> {
+        for l in blocks {
+            sender.send(l)?;
+        }
+        Ok(())
     }
 
     /// this cannot get you logs on arbitrary range
@@ -110,14 +124,14 @@ impl Stream {
             if end > to_block {
                 end = to_block
             }
-            for l in sink.put_logs(self.get_logs(&web3, start, end).await?) {
-                sender.send(l)?;
-            }
+            self.publish_blocks(
+                sender,
+                sink.put_logs(self.get_logs(&web3, start, end).await?),
+            )
+            .await?;
             start = start + block_step + 1u64;
         }
-        for l in sink.flush_remaining() {
-            sender.send(l)?;
-        }
+        self.publish_blocks(sender, sink.flush_remaining()).await?;
         Ok(())
     }
 
@@ -153,16 +167,16 @@ impl Stream {
                 safe_block = to_block;
             }
             if safe_block > get_from {
-                for l in sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?) {
-                    sender.send(l)?;
-                }
+                self.publish_blocks(
+                    sender,
+                    sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?),
+                )
+                .await?;
                 // set new get from block
                 get_from = safe_block + 1u64;
                 // this is the end
                 if safe_block == to_block {
-                    for l in sink.flush_remaining() {
-                        sender.send(l)?;
-                    }
+                    self.publish_blocks(sender, sink.flush_remaining()).await?;
                     return Ok(());
                 }
             }
@@ -227,6 +241,7 @@ mod test {
             to_block,
             confirmation_blocks,
             "event Transfer(address indexed from, address indexed to, uint value)",
+            |a| a,
         )
         .await
     }

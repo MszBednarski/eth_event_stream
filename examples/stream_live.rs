@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
         to_block,
         confirmation_blocks,
         "event Transfer(address indexed from, address indexed to, uint value)",
+        |a| a,
     )
     .await?;
 
