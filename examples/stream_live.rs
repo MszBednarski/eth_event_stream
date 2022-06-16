@@ -1,4 +1,4 @@
-use eth_event_stream::{http_web3, Stream};
+use eth_event_stream::stream::{http_web3, Stream};
 use std::env;
 use tokio::sync::broadcast;
 use web3::types::Address;
