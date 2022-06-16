@@ -74,6 +74,38 @@ fn parse_event_declaration(
     Ok((input, (name, params, anonymous)))
 }
 
+pub fn event_from_declaration(declaration: &'static str) -> anyhow::Result<Event> {
+    let decb = declaration.as_bytes();
+    let (input, (name, params, anonymous)) = parse_event_declaration(decb)?;
+
+    Ok(Event {
+        name: std::str::from_utf8(name)?.to_string(),
+        anonymous: anonymous == b"anonymous",
+        inputs: params
+            .iter()
+            .map(|p| {
+                (
+                    std::str::from_utf8(p.0).unwrap(),
+                    p.1 == b"indexed",
+                    std::str::from_utf8(p.2).unwrap().to_string(),
+                )
+            })
+            .map(|p| match p {
+                (_type, indexed, name) => EventParam {
+                    name,
+                    kind: match _type {
+                        "address" => ParamType::Address,
+                        "uint" => ParamType::Uint(256),
+                        "bool" => ParamType::Bool,
+                        _ => panic!("not supported type"),
+                    },
+                    indexed,
+                },
+            })
+            .collect(),
+    })
+}
+
 /// returns the erc20 transfer event
 
 #[allow(dead_code)]
@@ -105,12 +137,13 @@ pub fn erc20_transfer() -> anyhow::Result<Event> {
 
 #[cfg(test)]
 mod test {
-    use crate::events::parse_event_declaration;
+    use crate::events::{event_from_declaration, parse_event_declaration};
+    use ethabi::{Event, EventParam, ParamType};
 
     use super::{name_parser, param_parser};
 
     #[test]
-    fn test_parse_event_declaration() {
+    fn test_parse_event_declaration() -> anyhow::Result<()> {
         let decl =
             "event Transfer(address indexed from, address indexed to, uint value)".as_bytes();
         assert_eq!(
@@ -149,6 +182,35 @@ mod test {
                     "".as_bytes()
                 )
             ))
-        )
+        );
+        let params = vec![
+            EventParam {
+                name: "from".to_string(),
+                kind: ParamType::Address,
+                indexed: true,
+            },
+            EventParam {
+                name: "to".to_string(),
+                kind: ParamType::Address,
+                indexed: true,
+            },
+            EventParam {
+                name: "value".to_string(),
+                kind: ParamType::Uint(256),
+                indexed: false,
+            },
+        ];
+        let erc20_transfer_event = Event {
+            name: "Transfer".to_string(),
+            inputs: params,
+            anonymous: false,
+        };
+        assert_eq!(
+            event_from_declaration(
+                "event Transfer(address indexed from, address indexed to, uint value)"
+            )?,
+            erc20_transfer_event
+        );
+        Ok(())
     }
 }
