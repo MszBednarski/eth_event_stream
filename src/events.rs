@@ -4,11 +4,10 @@ use nom::bytes::complete::take_while;
 use nom::multi::many_m_n;
 use nom::sequence::tuple;
 use nom::{
-    bytes::complete::{is_not, tag, take_until, take_while_m_n},
+    bytes::complete::{tag, take_until},
     character::is_alphabetic,
     multi::many0,
     sequence::delimited,
-    sequence::separated_pair,
     IResult,
 };
 
@@ -104,35 +103,6 @@ pub fn event_from_declaration(declaration: &'static str) -> anyhow::Result<Event
             })
             .collect(),
     })
-}
-
-/// returns the erc20 transfer event
-
-#[allow(dead_code)]
-pub fn erc20_transfer() -> anyhow::Result<Event> {
-    let params = vec![
-        EventParam {
-            name: "from".to_string(),
-            kind: ParamType::Address,
-            indexed: true,
-        },
-        EventParam {
-            name: "to".to_string(),
-            kind: ParamType::Address,
-            indexed: true,
-        },
-        EventParam {
-            name: "value".to_string(),
-            kind: ParamType::Uint(256),
-            indexed: false,
-        },
-    ];
-    let event = Event {
-        name: "Transfer".to_string(),
-        inputs: params,
-        anonymous: false,
-    };
-    Ok(event)
 }
 
 #[cfg(test)]

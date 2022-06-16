@@ -1,4 +1,4 @@
-use eth_event_stream::events::erc20_transfer;
+use eth_event_stream::events::event_from_declaration;
 use eth_event_stream::{http_web3, Stream};
 use std::env;
 use tokio::sync::broadcast;
@@ -19,7 +19,9 @@ async fn main() -> anyhow::Result<()> {
         "Going to stream from block {} to {} inclusive",
         from_block, to_block
     );
-    let event = erc20_transfer()?;
+    let event = event_from_declaration(
+        "event Transfer(address indexed from, address indexed to, uint value)",
+    )?;
     let stream = Stream::new(
         http_url,
         ws_url,

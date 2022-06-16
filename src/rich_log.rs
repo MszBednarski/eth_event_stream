@@ -50,13 +50,15 @@ impl MakesRichLog for web3::types::Log {
 #[cfg(test)]
 mod test {
     use super::MakesRichLog;
-    use crate::events::erc20_transfer;
+    use crate::events::event_from_declaration;
     use anyhow::Result;
     use web3::types::{Address, Bytes, Log, H256, U256, U64};
 
     #[test]
     fn test_make_rich_log() -> Result<()> {
-        let event = erc20_transfer()?;
+        let event = event_from_declaration(
+            "event Transfer(address indexed from, address indexed to, uint value)",
+        )?;
         let address = Address::from_slice(
             hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")?.as_slice(),
         );

@@ -193,7 +193,7 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
-    use crate::{events::erc20_transfer, rich_log::RichLog};
+    use crate::{events::event_from_declaration, rich_log::RichLog};
     use anyhow::Result;
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
@@ -209,7 +209,9 @@ mod test {
         // from + 10
         let to_block = from_block + 10;
         let confirmation_blocks = 2u8;
-        let event = erc20_transfer()?;
+        let event = event_from_declaration(
+            "event Transfer(address indexed from, address indexed to, uint value)",
+        )?;
         Stream::new(
             http_url,
             ws_url,
