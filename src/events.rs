@@ -76,6 +76,12 @@ fn parse_event_declaration(
 pub fn event_from_declaration(declaration: &'static str) -> anyhow::Result<Event> {
     let decb = declaration.as_bytes();
     let (input, (name, params, anonymous)) = parse_event_declaration(decb)?;
+    if input.len() > 0 {
+        return Err(anyhow::anyhow!(
+            "The input event declaration has trailing data [{}]",
+            std::str::from_utf8(input)?
+        ));
+    }
 
     Ok(Event {
         name: std::str::from_utf8(name)?.to_string(),

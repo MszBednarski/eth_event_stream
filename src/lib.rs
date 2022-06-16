@@ -4,6 +4,7 @@ pub mod rich_log;
 
 use anyhow::Result;
 use ethabi::Event;
+use events::event_from_declaration;
 use log_sink::LogSink;
 use rich_log::{MakesRichLog, RichLog};
 use tokio::sync::broadcast;
@@ -30,7 +31,7 @@ pub struct Stream {
     pub confirmation_blocks: u8,
     pub from_block: U64,
     pub to_block: U64,
-    pub event: Event,
+    event: Event,
     /// used for the filter builder
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
@@ -55,9 +56,10 @@ impl Stream {
         from_block: u64,
         to_block: u64,
         confirmation_blocks: u8,
-        event: Event,
+        event_declaration: &'static str,
     ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
+        let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let s = Stream {
             http_url,
@@ -193,7 +195,7 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
-    use crate::{events::event_from_declaration, rich_log::RichLog};
+    use crate::rich_log::RichLog;
     use anyhow::Result;
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
@@ -209,9 +211,6 @@ mod test {
         // from + 10
         let to_block = from_block + 10;
         let confirmation_blocks = 2u8;
-        let event = event_from_declaration(
-            "event Transfer(address indexed from, address indexed to, uint value)",
-        )?;
         Stream::new(
             http_url,
             ws_url,
@@ -219,7 +218,7 @@ mod test {
             from_block,
             to_block,
             confirmation_blocks,
-            event,
+            "event Transfer(address indexed from, address indexed to, uint value)",
         )
         .await
     }
