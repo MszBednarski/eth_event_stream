@@ -21,7 +21,8 @@ impl LogSink {
         }
     }
 
-    /// flushes block range inclusive
+    /// flushes block range inclusive it also publishes empty blocks
+    /// it makes it easy to synchronize multiple event streams
     fn flush_blocks_range(&mut self, from: U64, to: U64) -> Vec<(U64, Vec<RichLog>)> {
         let from_u64 = from.as_u64();
         // range is inclusive
@@ -39,7 +40,10 @@ impl LogSink {
                     // send it to the consoomers
                     to_send.push((block_number_, logs));
                 }
-                None => {} // do nothing
+                None => {
+                    // send empty block, it will make it easy to sync
+                    to_send.push((block_number_, Vec::new()))
+                }
             }
         }
         // set min blocks to valid value
