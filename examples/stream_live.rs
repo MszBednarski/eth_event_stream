@@ -1,4 +1,7 @@
-use eth_event_stream::stream::{http_web3, Stream};
+use eth_event_stream::{
+    data_feed::block::BlockNotify,
+    stream::{http_web3, Stream},
+};
 use std::env;
 use tokio::sync::broadcast;
 use web3::types::Address;
@@ -11,13 +14,14 @@ async fn main() -> anyhow::Result<()> {
     let usdc: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
     let contract_address = Address::from_slice(hex::decode(&usdc[2..])?.as_slice());
     let cur_block = web3.eth().block_number().await?.as_u64();
-    let from_block = cur_block - 25;
+    let from_block = cur_block - 40;
     let to_block = cur_block + 6;
     println!(
         "Going to stream from block {} to {} inclusive",
         from_block, to_block
     );
 
+    let notify = BlockNotify::new(&http_url, &ws_url).await?;
     let (sender, mut rx) = broadcast::channel(1000);
     let mut stream = Stream::new(
         http_url,
@@ -27,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         to_block,
         "event Transfer(address indexed from, address indexed to, uint value)",
         sender,
+        notify.subscribe(),
     )
     .await?;
     stream.block_step(5);

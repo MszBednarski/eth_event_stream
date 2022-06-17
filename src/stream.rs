@@ -6,7 +6,7 @@ use crate::{
 use anyhow::Result;
 use ethabi::Event;
 use tokio::sync::broadcast;
-use web3::futures::TryStreamExt;
+use tokio::sync::watch;
 use web3::transports::Http;
 use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H256, U64};
 use web3::{api, transports, Web3};
@@ -30,6 +30,7 @@ pub struct Stream {
     pub to_block: U64,
     confirmation_blocks: u8,
     block_step: u64,
+    block_notify_subscription: watch::Receiver<U64>,
     sender: broadcast::Sender<(U64, Vec<RichLog>)>,
     event: Event,
     /// used for the filter builder
@@ -57,11 +58,13 @@ impl Stream {
         to_block: u64,
         event_declaration: &'static str,
         sender: broadcast::Sender<(U64, Vec<RichLog>)>,
+        block_notify_subscription: watch::Receiver<U64>,
     ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let s = Stream {
+            block_notify_subscription,
             sender,
             block_step: 1000,
             http_url,
@@ -132,27 +135,13 @@ impl Stream {
     }
 
     /// streams live blocks from_block inclusive
-    async fn stream_live_logs(&self, from_block: U64, to_block: U64) -> Result<()> {
+    async fn stream_live_logs(&mut self, from_block: U64, to_block: U64) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
         let mut sink = LogSink::new();
-        let (block_sender, mut block_receiver) = broadcast::channel(100);
-        let ws_web3 = ws_web3(&self.ws_url).await?;
-        // send new block numbers to the block_receiver
-        tokio::spawn(async move {
-            let mut subscription = ws_web3.eth_subscribe().subscribe_new_heads().await.unwrap();
-            loop {
-                let block = subscription.try_next().await;
-                if block.is_ok() {
-                    let unwraped = block.unwrap();
-                    let block_number = unwraped.unwrap().number.unwrap();
-                    block_sender.send(block_number).unwrap();
-                }
-            }
-        });
 
         let mut get_from = from_block;
-        loop {
-            let cur_block = block_receiver.recv().await?;
+        while self.block_notify_subscription.changed().await.is_ok() {
+            let cur_block = *self.block_notify_subscription.borrow();
             let mut safe_block = cur_block - self.confirmation_blocks;
             if safe_block > to_block {
                 safe_block = to_block;
@@ -171,12 +160,13 @@ impl Stream {
                 }
             }
         }
+        panic!("Block notify subscription failed.");
     }
 
     /// uses parameter sender to send blocks of eth logs to all recievers
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
-    pub async fn block_stream(&self) -> Result<()> {
+    pub async fn block_stream(&mut self) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
         // set the stream mode to live or historical
         // based on the users request
@@ -202,7 +192,7 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
-    use crate::rich_log::RichLog;
+    use crate::{data_feed::block::BlockNotify, rich_log::RichLog};
     use anyhow::Result;
     use std::{borrow::BorrowMut, env};
     use tokio::sync::broadcast;
@@ -221,6 +211,7 @@ mod test {
         // from + 10
         let to_block = from_block + 10;
         let (sender, rx) = broadcast::channel(1000);
+        let notify = BlockNotify::new(&http_url, &ws_url).await?;
         let mut stream = Stream::new(
             http_url,
             ws_url,
@@ -229,6 +220,7 @@ mod test {
             to_block,
             "event Transfer(address indexed from, address indexed to, uint value)",
             sender,
+            notify.subscribe(),
         )
         .await?;
         stream.block_step(2);
@@ -261,7 +253,7 @@ mod test {
     #[tokio::test]
     async fn test_eth_logs_number() -> Result<()> {
         // check how to use eth logs
-        let (stream, mut rx) = test_stream().await?;
+        let (mut stream, mut rx) = test_stream().await?;
         // run it as a separate task
         tokio::spawn(async move { stream.block_stream().await });
 

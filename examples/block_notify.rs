@@ -9,7 +9,7 @@ async fn main() -> Result<()> {
     let http_url = env::var("HTTP_NODE_URL")?;
     let ws_url = env::var("WS_NODE_URL")?;
 
-    let notify = BlockNotify::new(http_url, ws_url).await?;
+    let notify = BlockNotify::new(&http_url, &ws_url).await?;
 
     let mut rx = notify.subscribe();
 

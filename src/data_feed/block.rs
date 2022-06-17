@@ -40,7 +40,7 @@ impl BlockNotify {
         }
     }
 
-    pub async fn new(http_url: String, ws_url: String) -> Result<Self> {
+    pub async fn new(http_url: &String, ws_url: &String) -> Result<Self> {
         let http_t = Http::new(&http_url.as_str())?;
         let http = Web3::new(http_t);
         let init_block = http.eth().block_number().await?;
