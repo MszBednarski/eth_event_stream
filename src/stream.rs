@@ -5,8 +5,9 @@ use crate::{
 };
 use anyhow::Result;
 use ethabi::Event;
-use tokio::sync::broadcast;
-use tokio::sync::watch;
+use std::borrow::Borrow;
+use std::sync::Arc;
+use tokio::sync::{watch, Mutex};
 use web3::transports::Http;
 use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H256, U64};
 use web3::{api, transports, Web3};
@@ -25,13 +26,13 @@ pub async fn ws_web3(ws_url: &str) -> Result<api::Web3<web3::transports::WebSock
 pub struct Stream {
     pub http_url: String,
     pub ws_url: String,
-    pub contract_address: Address,
+    pub address: Address,
     pub from_block: U64,
     pub to_block: U64,
     confirmation_blocks: u8,
+    sink: Arc<Mutex<LogSink>>,
     block_step: u64,
     block_notify_subscription: watch::Receiver<U64>,
-    sender: broadcast::Sender<(U64, Vec<RichLog>)>,
     event: Event,
     /// used for the filter builder
     f_contract_address: Vec<Address>,
@@ -53,23 +54,23 @@ impl Stream {
     pub async fn new(
         http_url: String,
         ws_url: String,
-        contract_address: Address,
+        address: Address,
         from_block: u64,
         to_block: u64,
         event_declaration: &'static str,
-        sender: broadcast::Sender<(U64, Vec<RichLog>)>,
         block_notify_subscription: watch::Receiver<U64>,
+        sink: Arc<Mutex<LogSink>>,
     ) -> Result<Stream> {
-        let f_contract_address = vec![contract_address];
+        let f_contract_address = vec![address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let s = Stream {
             block_notify_subscription,
-            sender,
             block_step: 1000,
             http_url,
             ws_url,
-            contract_address,
+            sink,
+            address,
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
             // I found that 2 block delay usually feeds reliably
@@ -87,13 +88,6 @@ impl Stream {
 
     pub fn confirmation_blocks(&mut self, new_confirmation: u8) {
         self.confirmation_blocks = new_confirmation
-    }
-
-    async fn publish_blocks(&self, blocks: Vec<(U64, Vec<RichLog>)>) -> Result<()> {
-        for l in blocks {
-            self.sender.send(l)?;
-        }
-        Ok(())
     }
 
     /// this cannot get you logs on arbitrary range
@@ -118,7 +112,6 @@ impl Stream {
     /// streams it through sender to consoomers
     async fn stream_historical_logs(&self, from_block: U64, to_block: U64) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
-        let mut sink = LogSink::new();
         // get in batches of size block_step
         let mut start = from_block;
         while start < to_block {
@@ -126,18 +119,18 @@ impl Stream {
             if end > to_block {
                 end = to_block
             }
-            self.publish_blocks(sink.put_logs(self.get_logs(&web3, start, end).await?))
-                .await?;
+            self.sink.lock().await.put_logs(
+                self.address.borrow(),
+                self.get_logs(&web3, start, end).await?,
+            );
             start = start + self.block_step + 1u64;
         }
-        self.publish_blocks(sink.flush_remaining()).await?;
         Ok(())
     }
 
     /// streams live blocks from_block inclusive
     async fn stream_live_logs(&mut self, from_block: U64, to_block: U64) -> Result<()> {
         let web3 = http_web3(&self.http_url)?;
-        let mut sink = LogSink::new();
 
         let mut get_from = from_block;
         while self.block_notify_subscription.changed().await.is_ok() {
@@ -147,15 +140,15 @@ impl Stream {
                 safe_block = to_block;
             }
             if safe_block > get_from {
-                self.publish_blocks(
-                    sink.put_logs(self.get_logs(&web3, get_from, safe_block).await?),
-                )
-                .await?;
+                self.sink.lock().await.put_logs(
+                    &self.address,
+                    self.get_logs(&web3, get_from, safe_block).await?,
+                );
                 // set new get from block
                 get_from = safe_block + 1u64;
                 // this is the end
                 if safe_block == to_block {
-                    self.publish_blocks(sink.flush_remaining()).await?;
+                    // flush remaining
                     return Ok(());
                 }
             }
@@ -192,49 +185,39 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
+    use crate::log_sink::LogSink;
     use crate::{data_feed::block::BlockNotify, rich_log::RichLog};
     use anyhow::Result;
+    use std::collections::HashMap;
+    use std::sync::Arc;
     use std::{borrow::BorrowMut, env};
-    use tokio::sync::broadcast;
+    use tokio::sync::Mutex;
     use web3::types::Address;
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    async fn test_stream() -> Result<(
-        Stream,
-        broadcast::Receiver<(web3::types::U64, Vec<RichLog>)>,
-    )> {
+    async fn test_stream() -> Result<(Stream, Arc<Mutex<LogSink>>)> {
         let http_url = env::var("HTTP_NODE_URL")?;
         let ws_url = env::var("WS_NODE_URL")?;
-        let contract_address = Address::from_slice(hex::decode(USDC)?.as_slice());
+        let address = Address::from_slice(hex::decode(USDC)?.as_slice());
         let from_block = 14658323u64;
         // from + 10
         let to_block = from_block + 10;
-        let (sender, rx) = broadcast::channel(1000);
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
+        let sink = Arc::new(Mutex::new(LogSink::new(vec![address])));
         let mut stream = Stream::new(
             http_url,
             ws_url,
-            contract_address,
+            address,
             from_block,
             to_block,
             "event Transfer(address indexed from, address indexed to, uint value)",
-            sender,
             notify.subscribe(),
+            sink.clone(),
         )
         .await?;
         stream.block_step(2);
-        Ok((stream, rx))
-    }
-
-    fn test_ordering(logs: &Vec<RichLog>) {
-        logs.iter()
-            .map(|l| l.log_index.as_u128() as i128)
-            // verify ordering of the logs
-            .fold(-1i128, |prev, item| {
-                assert!(item > prev);
-                item
-            });
+        Ok((stream, sink))
     }
 
     #[test]
@@ -253,27 +236,19 @@ mod test {
     #[tokio::test]
     async fn test_eth_logs_number() -> Result<()> {
         // check how to use eth logs
-        let (mut stream, mut rx) = test_stream().await?;
-        // run it as a separate task
-        tokio::spawn(async move { stream.block_stream().await });
+        let (mut stream, sink) = test_stream().await?;
 
-        let mut item = rx.recv().await;
+        stream.block_stream().await?;
 
         let mut all_logs = Vec::new();
 
-        if !item.is_ok() {
-            return Err(anyhow::anyhow!("No logs returned"));
-        }
-
-        while item.is_ok() {
-            let (block_number, mut block_logs) = item?;
+        let results = sink.lock().await.flush_remaining();
+        println!("{:?}", sink.lock().await);
+        for (block_number, mut entry) in results {
+            let block_logs = entry.get_mut(&stream.address).unwrap();
             println!("Got block {} size {}", block_number, block_logs.len());
-            test_ordering(&block_logs);
-            all_logs.append(block_logs.borrow_mut());
-            // consoom the message
-            item = rx.recv().await;
+            all_logs.append(block_logs);
         }
-        // if it reaches here it means the stream ended
 
         assert_eq!(all_logs.len(), 59);
 

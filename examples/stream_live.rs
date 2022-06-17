@@ -1,9 +1,11 @@
 use eth_event_stream::{
     data_feed::block::BlockNotify,
+    log_sink::LogSink,
     stream::{http_web3, Stream},
 };
-use std::env;
+use std::{env, sync::Arc};
 use tokio::sync::broadcast;
+use tokio::sync::Mutex;
 use web3::types::Address;
 
 #[tokio::main]
@@ -22,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let notify = BlockNotify::new(&http_url, &ws_url).await?;
-    let (sender, mut rx) = broadcast::channel(1000);
+    let sink = Arc::new(Mutex::new(LogSink::new(vec![contract_address])));
     let mut stream = Stream::new(
         http_url,
         ws_url,
@@ -30,32 +32,27 @@ async fn main() -> anyhow::Result<()> {
         from_block,
         to_block,
         "event Transfer(address indexed from, address indexed to, uint value)",
-        sender,
         notify.subscribe(),
+        sink.clone(),
     )
     .await?;
     stream.block_step(5);
 
     tokio::spawn(async move { stream.block_stream().await });
 
-    loop {
-        let block = rx.recv().await;
-        if block.is_err() {
-            println!("{:?}", block);
-            return Ok(());
-        }
-        match block.unwrap() {
-            (number, logs) => {
-                let parsed: Vec<(&ethabi::Token, &ethabi::Token, &ethabi::Token)> = logs
-                    .iter()
-                    .map(|l| match &l.params[..] {
-                        [from, to, value] => Some((&from.value, &to.value, &value.value)),
-                        _ => None,
-                    })
-                    .filter_map(|a| a)
-                    .collect();
-                println!("Block {}. Got logs. {}", number, parsed.len())
-            }
-        }
+    let res = sink.lock().await.flush_remaining();
+
+    for (number, entry) in res {
+        let logs = entry.get(&contract_address).unwrap();
+        let parsed: Vec<(&ethabi::Token, &ethabi::Token, &ethabi::Token)> = logs
+            .iter()
+            .map(|l| match &l.params[..] {
+                [from, to, value] => Some((&from.value, &to.value, &value.value)),
+                _ => None,
+            })
+            .filter_map(|a| a)
+            .collect();
+        println!("Block {}. Got logs. {}", number, parsed.len())
     }
+    Ok(())
 }
