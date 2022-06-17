@@ -10,7 +10,6 @@ async fn main() -> anyhow::Result<()> {
     let web3 = http_web3(&http_url)?;
     let usdc: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
     let contract_address = Address::from_slice(hex::decode(&usdc[2..])?.as_slice());
-    let confirmation_blocks = 2u8;
     let cur_block = web3.eth().block_number().await?.as_u64();
     let from_block = cur_block - 25;
     let to_block = cur_block + 6;
@@ -20,18 +19,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let (sender, mut rx) = broadcast::channel(1000);
-    let stream = Stream::new(
+    let mut stream = Stream::new(
         http_url,
         ws_url,
         contract_address,
         from_block,
         to_block,
-        confirmation_blocks,
         "event Transfer(address indexed from, address indexed to, uint value)",
         sender,
-        5,
     )
     .await?;
+    stream.block_step(5);
 
     tokio::spawn(async move { stream.block_stream().await });
 

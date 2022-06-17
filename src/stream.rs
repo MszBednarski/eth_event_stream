@@ -55,29 +55,35 @@ impl Stream {
         contract_address: Address,
         from_block: u64,
         to_block: u64,
-        confirmation_blocks: u8,
         event_declaration: &'static str,
         sender: broadcast::Sender<(U64, Vec<RichLog>)>,
-        block_step: u64,
     ) -> Result<Stream> {
         let f_contract_address = vec![contract_address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let s = Stream {
             sender,
-            block_step,
+            block_step: 1000,
             http_url,
             ws_url,
             contract_address,
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
             // I found that 2 block delay usually feeds reliably
-            confirmation_blocks,
+            confirmation_blocks: 2u8,
             event,
             f_contract_address,
             f_topic,
         };
         Ok(s)
+    }
+
+    pub fn block_step(&mut self, new_step: u64) {
+        self.block_step = new_step
+    }
+
+    pub fn confirmation_blocks(&mut self, new_confirmation: u8) {
+        self.confirmation_blocks = new_confirmation
     }
 
     async fn publish_blocks(&self, blocks: Vec<(U64, Vec<RichLog>)>) -> Result<()> {
@@ -214,23 +220,19 @@ mod test {
         let from_block = 14658323u64;
         // from + 10
         let to_block = from_block + 10;
-        let confirmation_blocks = 2u8;
         let (sender, rx) = broadcast::channel(1000);
-        Ok((
-            Stream::new(
-                http_url,
-                ws_url,
-                contract_address,
-                from_block,
-                to_block,
-                confirmation_blocks,
-                "event Transfer(address indexed from, address indexed to, uint value)",
-                sender,
-                2,
-            )
-            .await?,
-            rx,
-        ))
+        let mut stream = Stream::new(
+            http_url,
+            ws_url,
+            contract_address,
+            from_block,
+            to_block,
+            "event Transfer(address indexed from, address indexed to, uint value)",
+            sender,
+        )
+        .await?;
+        stream.block_step(2);
+        Ok((stream, rx))
     }
 
     fn test_ordering(logs: &Vec<RichLog>) {
