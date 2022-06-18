@@ -24,12 +24,12 @@ struct Sink<SourceKey, T> {
     sources: Vec<SourceKey>,
     source_vals: HashMap<SourceKey, u64>,
     /// needed so that the sink knows how much it needs to backfill for some sources
-    from_block: u64,
+    bottom: u64,
     ps: PubSub<u64>,
     sender: Arc<watch::Sender<u64>>,
 }
 
-impl<A: Ord + Clone + Hash, D> Sink<A, D> {
+impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
     pub fn new(sources: Vec<A>, from_block: u64) -> Self {
         let mut store = BTreeMap::new() as BTreeMap<A, BTreeMap<u64, BTreeMap<u128, D>>>;
         let mut source_vals = HashMap::new();
@@ -43,7 +43,7 @@ impl<A: Ord + Clone + Hash, D> Sink<A, D> {
             ps,
             store,
             sources,
-            from_block,
+            bottom: from_block,
             source_vals,
             sender,
         }
@@ -70,6 +70,41 @@ impl<A: Ord + Clone + Hash, D> Sink<A, D> {
             }
         }
         panic!("Failed to wait and pause")
+    }
+
+    // up_to not inclusive
+    pub fn flush_up_to(&mut self, up_to: u64) -> Vec<(u64, HashMap<A, Vec<D>>)> {
+        if up_to < self.synced_up_to() {
+            panic!("Tried to flush above synced val.");
+        }
+        let mut results = Vec::new();
+
+        for blk in self.bottom..up_to {
+            let mut blk_result = HashMap::new();
+            for a in self.sources.clone() {
+                let source_store = self.store.get_mut(&a).unwrap();
+                let blk_store = source_store.get_mut(&blk);
+                match blk_store {
+                    Some(res) => {
+                        // get the logs
+                        let logs = res.values().cloned().collect();
+                        // delete logs from store
+                        source_store.remove(&blk);
+                        // put them to flush
+                        blk_result.insert(a, logs);
+                    }
+                    None => {
+                        // put empty vec
+                        blk_result.insert(a, Vec::new());
+                        ()
+                    }
+                };
+            }
+            results.push((blk, blk_result));
+        }
+        self.bottom = up_to;
+
+        results
     }
 
     /// don't feed it source keys that you did not register
@@ -148,5 +183,32 @@ mod tests {
         Sink::wait_until_at(sink.clone(), 7).await;
         assert_eq!(sink.lock().await.synced_up_to(), 7);
         Ok(())
+    }
+
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_flush() {
+        let mut sink = Sink::new(vec![-7, -5], 0);
+        sink.put(&-7, 1, 0, 0).unwrap();
+        sink.put(&-5, 2, 0, 0).unwrap();
+        let up_to = sink.synced_up_to();
+        assert_eq!(
+            sink.flush_up_to(up_to),
+            vec![(0, HashMap::from([(-5, vec![]), (-7, vec![])]))]
+        );
+
+        sink.put(&-7, 1, 1, 42).unwrap();
+        sink.put(&-7, 3, 0, 0).unwrap();
+        sink.put(&-5, 4, 0, 0).unwrap();
+
+        let up_to = sink.synced_up_to();
+        assert_eq!(
+            sink.flush_up_to(up_to),
+            vec![
+                (1, HashMap::from([(-5, vec![]), (-7, vec![0, 42])])),
+                (2, HashMap::from([(-5, vec![0]), (-7, vec![])]))
+            ]
+        );
     }
 }
