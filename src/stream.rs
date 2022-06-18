@@ -1,7 +1,7 @@
 use crate::{
     events::event_from_declaration,
-    log_sink::LogSink,
     rich_log::{MakesRichLog, RichLog},
+    sink::Sink,
 };
 use anyhow::Result;
 use ethabi::Event;
@@ -30,7 +30,7 @@ pub struct Stream {
     pub from_block: U64,
     pub to_block: U64,
     confirmation_blocks: u8,
-    sink: Arc<Mutex<LogSink>>,
+    sink: Arc<Mutex<Sink<Address, RichLog>>>,
     block_step: u64,
     block_notify_subscription: watch::Receiver<U64>,
     event: Event,
@@ -59,7 +59,7 @@ impl Stream {
         to_block: u64,
         event_declaration: &'static str,
         block_notify_subscription: watch::Receiver<U64>,
-        sink: Arc<Mutex<LogSink>>,
+        sink: Arc<Mutex<Sink<Address, RichLog>>>,
     ) -> Result<Stream> {
         let f_contract_address = vec![address];
         let event = event_from_declaration(event_declaration)?;
@@ -108,6 +108,21 @@ impl Stream {
         Ok(parsed_log)
     }
 
+    async fn put(&self, vals: Vec<RichLog>) -> Result<()> {
+        self.sink.lock().await.put_multiple(
+            vals.iter()
+                .map(|l| {
+                    (
+                        self.address.borrow(),
+                        l.block_number.as_u64(),
+                        l.log_index.as_u128(),
+                        l.to_owned(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
     /// gets logs that are old enough to be finalized for sure
     /// streams it through sender to consoomers
     async fn stream_historical_logs(&self, from_block: U64, to_block: U64) -> Result<()> {
@@ -119,10 +134,7 @@ impl Stream {
             if end > to_block {
                 end = to_block
             }
-            self.sink.lock().await.put_logs(
-                self.address.borrow(),
-                self.get_logs(&web3, start, end).await?,
-            );
+            self.put(self.get_logs(&web3, start, end).await?).await?;
             start = start + self.block_step + 1u64;
         }
         Ok(())
@@ -140,10 +152,8 @@ impl Stream {
                 safe_block = to_block;
             }
             if safe_block > get_from {
-                self.sink.lock().await.put_logs(
-                    &self.address,
-                    self.get_logs(&web3, get_from, safe_block).await?,
-                );
+                self.put(self.get_logs(&web3, get_from, safe_block).await?)
+                    .await?;
                 // set new get from block
                 get_from = safe_block + 1u64;
                 // this is the end
@@ -185,8 +195,7 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
-    use crate::log_sink::LogSink;
-    use crate::{data_feed::block::BlockNotify, rich_log::RichLog};
+    use crate::{data_feed::block::BlockNotify, rich_log::RichLog, sink::Sink};
     use anyhow::Result;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -196,15 +205,15 @@ mod test {
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    async fn test_stream() -> Result<(Stream, Arc<Mutex<LogSink>>)> {
+    async fn test_stream() -> Result<(Stream, Arc<Mutex<Sink<Address, RichLog>>>, u64)> {
         let http_url = env::var("HTTP_NODE_URL")?;
         let ws_url = env::var("WS_NODE_URL")?;
         let address = Address::from_slice(hex::decode(USDC)?.as_slice());
         let from_block = 14658323u64;
         // from + 10
-        let to_block = from_block + 10;
+        let to_block = from_block + 8;
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
-        let sink = Arc::new(Mutex::new(LogSink::new(vec![address])));
+        let sink = Arc::new(Mutex::new(Sink::new(vec![address], from_block)));
         let mut stream = Stream::new(
             http_url,
             ws_url,
@@ -217,7 +226,7 @@ mod test {
         )
         .await?;
         stream.block_step(2);
-        Ok((stream, sink))
+        Ok((stream, sink, to_block))
     }
 
     #[test]
@@ -228,29 +237,26 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_new_historical() -> Result<()> {
-        test_stream().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_eth_logs_number() -> Result<()> {
         // check how to use eth logs
-        let (mut stream, sink) = test_stream().await?;
+        let (mut stream, sink, to_block) = test_stream().await?;
+        let addr = stream.address.clone();
 
-        stream.block_stream().await?;
+        tokio::spawn(async move { stream.block_stream().await });
+
+        Sink::wait_until_at(sink.clone(), to_block).await;
 
         let mut all_logs = Vec::new();
 
-        let results = sink.lock().await.flush_remaining();
-        println!("{:?}", sink.lock().await);
+        let results = sink.lock().await.flush_up_to(to_block);
+        // println!("{:?}", sink.lock().await);
         for (block_number, mut entry) in results {
-            let block_logs = entry.get_mut(&stream.address).unwrap();
+            let block_logs = entry.get_mut(&addr).unwrap();
             println!("Got block {} size {}", block_number, block_logs.len());
             all_logs.append(block_logs);
         }
 
-        assert_eq!(all_logs.len(), 59);
+        assert_eq!(all_logs.len(), 50);
 
         Ok(())
     }

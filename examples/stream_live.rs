@@ -1,6 +1,6 @@
 use eth_event_stream::{
     data_feed::block::BlockNotify,
-    log_sink::LogSink,
+    sink::Sink,
     stream::{http_web3, Stream},
 };
 use std::{env, sync::Arc};
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let notify = BlockNotify::new(&http_url, &ws_url).await?;
-    let sink = Arc::new(Mutex::new(LogSink::new(vec![contract_address])));
+    let sink = Arc::new(Mutex::new(Sink::new(vec![contract_address], from_block)));
     let mut stream = Stream::new(
         http_url,
         ws_url,
@@ -40,19 +40,22 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move { stream.block_stream().await });
 
-    let res = sink.lock().await.flush_remaining();
-
-    for (number, entry) in res {
-        let logs = entry.get(&contract_address).unwrap();
-        let parsed: Vec<(&ethabi::Token, &ethabi::Token, &ethabi::Token)> = logs
-            .iter()
-            .map(|l| match &l.params[..] {
-                [from, to, value] => Some((&from.value, &to.value, &value.value)),
-                _ => None,
-            })
-            .filter_map(|a| a)
-            .collect();
-        println!("Block {}. Got logs. {}", number, parsed.len())
+    let mut cur = from_block;
+    loop {
+        Sink::wait_until_at(sink.clone(), cur).await;
+        let res = sink.lock().await.flush_up_to(cur);
+        for (number, entry) in res {
+            let logs = entry.get(&contract_address).unwrap();
+            let parsed: Vec<(&ethabi::Token, &ethabi::Token, &ethabi::Token)> = logs
+                .iter()
+                .map(|l| match &l.params[..] {
+                    [from, to, value] => Some((&from.value, &to.value, &value.value)),
+                    _ => None,
+                })
+                .filter_map(|a| a)
+                .collect();
+            println!("Block {}. Got logs. {}", number, parsed.len())
+        }
+        cur += 1;
     }
-    Ok(())
 }

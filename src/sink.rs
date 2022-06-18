@@ -19,7 +19,7 @@ use tokio::sync::{Mutex, MutexGuard};
 /// - panic the moment it gets an event from a block it already published
 /// - sort incoming on block level and log level
 #[derive(Debug)]
-struct Sink<SourceKey, T> {
+pub struct Sink<SourceKey, T> {
     store: BTreeMap<SourceKey, BTreeMap<u64, BTreeMap<u128, T>>>,
     sources: Vec<SourceKey>,
     source_vals: HashMap<SourceKey, u64>,
@@ -53,7 +53,10 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
     pub fn synced_up_to(&mut self) -> u64 {
         // we can flush up to the min(of all maximums) - 1
         // thus what we output is the min(of all maximums)
-        self.source_vals.values().min().unwrap().clone()
+        match self.source_vals.values().min() {
+            Some(val) => val.clone(),
+            None => self.bottom,
+        }
     }
 
     /// non-inclusive block target (all blocks below that block)
@@ -74,7 +77,7 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
 
     // up_to not inclusive
     pub fn flush_up_to(&mut self, up_to: u64) -> Vec<(u64, HashMap<A, Vec<D>>)> {
-        if up_to < self.synced_up_to() {
+        if up_to > self.synced_up_to() {
             panic!("Tried to flush above synced val.");
         }
         let mut results = Vec::new();
@@ -105,6 +108,13 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
         self.bottom = up_to;
 
         results
+    }
+
+    pub fn put_multiple(&mut self, vals: Vec<(&A, u64, u128, D)>) -> Result<()> {
+        for (s, b, l, d) in vals {
+            self.put(s, b, l, d)?;
+        }
+        Ok(())
     }
 
     /// don't feed it source keys that you did not register
