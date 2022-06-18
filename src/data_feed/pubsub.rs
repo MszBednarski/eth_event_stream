@@ -2,15 +2,21 @@ use std::sync::Arc;
 use tokio::sync::watch::{self, Receiver, Sender};
 
 /// gives a pub sub interface to watch what is the current state of variable
+#[derive(Debug)]
 pub struct PubSub<T> {
     /// basically owns the entire watch channel
     arc: Arc<Sender<T>>,
+    /// we need this receiver so that the channel does not get closed
+    _rx: Receiver<T>,
 }
 
 impl<A> PubSub<A> {
     pub fn new(init: A) -> Self {
-        let (s, _) = watch::channel(init);
-        PubSub { arc: Arc::new(s) }
+        let (s, _rx) = watch::channel(init);
+        PubSub {
+            arc: Arc::new(s),
+            _rx,
+        }
     }
 
     pub fn sender(&self) -> Arc<Sender<A>> {
