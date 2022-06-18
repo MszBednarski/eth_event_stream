@@ -101,6 +101,7 @@ pub fn event_from_declaration(declaration: &'static str) -> anyhow::Result<Event
                     kind: match _type {
                         "address" => ParamType::Address,
                         "uint" => ParamType::Uint(256),
+                        "uint256" => ParamType::Uint(256),
                         "bool" => ParamType::Bool,
                         _ => panic!("not supported type"),
                     },
