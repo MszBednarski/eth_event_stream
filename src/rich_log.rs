@@ -23,6 +23,12 @@ pub trait MakesRichLog {
 
 impl MakesRichLog for web3::types::Log {
     fn make_rich_log(&self, event: &ethabi::Event) -> Result<RichLog> {
+        if self.is_removed() {
+            panic!(
+                "Encountered removed event! {:?}. Increase the number of confirmation blocks.",
+                self
+            );
+        }
         // log needed to parse Log.data
         let raw_log = RawLog {
             topics: self
