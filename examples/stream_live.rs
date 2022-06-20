@@ -26,7 +26,6 @@ async fn main() -> anyhow::Result<()> {
     let sink = Arc::new(Mutex::new(Sink::new(vec![contract_address], from_block)));
     let mut stream = Stream::new(
         http_url,
-        ws_url,
         contract_address,
         from_block,
         to_block,
@@ -41,8 +40,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut cur = from_block;
     loop {
-        Sink::wait_until_at(sink.clone(), cur).await;
-        let res = sink.lock().await.flush_up_to(cur);
+        Sink::wait_until_included(sink.clone(), cur).await;
+        let res = sink.lock().await.flush_including(cur);
         for (number, entry) in res {
             let logs = entry.get(&contract_address).unwrap();
             let parsed: Vec<(&ethabi::Token, &ethabi::Token, &ethabi::Token)> = logs

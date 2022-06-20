@@ -48,40 +48,43 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
         }
     }
 
-    /// returns non-inclusive block up to which the synced data can be flushed / was flushed
-    pub fn synced_up_to(&mut self) -> u64 {
+    /// returns inclusive block up to which the synced data can be flushed / was flushed
+    pub fn synced_including(&mut self) -> Option<u64> {
         // we can flush up to the min(of all maximums) - 1
-        // thus what we output is the min(of all maximums)
         match self.source_vals.values().min() {
-            Some(val) => val.clone(),
-            None => self.bottom,
+            Some(val) => match val {
+                0 => None,
+                _ => Some(val.clone() - 1),
+            },
+            None => None,
         }
     }
 
-    /// non-inclusive block target (all blocks below that block)
-    pub async fn wait_until_at(target: Arc<Mutex<Self>>, up_to: u64) {
-        let cur = target.lock().await.synced_up_to();
-        if cur >= up_to {
+    /// inclusive block target (all blocks including that block)
+    pub async fn wait_until_included(target: Arc<Mutex<Self>>, to_block_inclusive: u64) {
+        let cur = target.lock().await.synced_including();
+        if cur.is_some() && cur >= Some(to_block_inclusive) {
             return;
         }
         let mut rx = target.lock().await.ps.subscribe();
         while rx.changed().await.borrow().is_ok() {
             let current = rx.borrow().clone();
-            if current >= up_to {
+            if current >= to_block_inclusive {
                 return;
             }
         }
         panic!("Failed to wait and pause")
     }
 
-    // up_to not inclusive
-    pub fn flush_up_to(&mut self, up_to: u64) -> Vec<(u64, HashMap<A, Vec<D>>)> {
-        if up_to > self.synced_up_to() {
+    // flush inclusive given block
+    pub fn flush_including(&mut self, include_target: u64) -> Vec<(u64, HashMap<A, Vec<D>>)> {
+        let synced = self.synced_including();
+        if synced.is_none() || include_target > synced.unwrap() {
             panic!("Tried to flush above synced val.");
         }
         let mut results = Vec::new();
 
-        for blk in self.bottom..up_to {
+        for blk in self.bottom..=include_target {
             let mut blk_result = HashMap::new();
             for a in self.sources.clone() {
                 let source_store = self.store.get_mut(&a).unwrap();
@@ -104,26 +107,42 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
             }
             results.push((blk, blk_result));
         }
-        self.bottom = up_to;
+        self.bottom = include_target + 1;
 
         results
     }
 
-    pub fn put_multiple(&mut self, vals: Vec<(&A, u64, u128, D)>) -> Result<()> {
-        for (s, b, l, d) in vals {
-            self.put(s, b, l, d)?;
+    /// needs to be aware of the end_block inclusive in the range inserted to make an empty entry
+    /// for the purpose of accurate flushing
+    pub fn put_multiple(
+        &mut self,
+        source_key: &A,
+        vals: Vec<(u64, u128, D)>,
+        end_block: u64,
+    ) -> Result<()> {
+        for (b, l, d) in vals {
+            self.put(source_key, b, l, d)?;
         }
-        Ok(())
+        self.sync(source_key, end_block)
     }
 
-    /// don't feed it source keys that you did not register
-    pub fn put(&mut self, source_key: &A, block_key: u64, log_key: u128, data: D) -> Result<()> {
-        let store_for_source = self.store.get_mut(source_key).unwrap();
+    /// syncs the sinks flush data
+    fn sync(&mut self, source_key: &A, block_key: u64) -> Result<()> {
         // set the max known log value for the source
         self.source_vals.insert(
             source_key.clone(),
             max(block_key, self.source_vals.get(source_key).unwrap().clone()),
         );
+        let last_synced = self.synced_including();
+        if last_synced.is_some() {
+            self.sender.send(last_synced.unwrap())?;
+        }
+        Ok(())
+    }
+
+    /// don't feed it source keys that you did not register
+    fn put(&mut self, source_key: &A, block_key: u64, log_key: u128, data: D) -> Result<()> {
+        let store_for_source = self.store.get_mut(source_key).unwrap();
 
         match store_for_source.get_mut(&block_key) {
             Some(entry) => {
@@ -137,9 +156,19 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
                 store_for_source.insert(block_key, map);
             }
         }
-        let up_to = self.synced_up_to();
-        self.sender.send(up_to)?;
         Ok(())
+    }
+
+    /// put key into sink and then sync its state
+    pub fn put_sync(
+        &mut self,
+        source_key: &A,
+        block_key: u64,
+        log_key: u128,
+        data: D,
+    ) -> Result<()> {
+        self.put(source_key, block_key, log_key, data)?;
+        self.sync(source_key, block_key)
     }
 }
 
@@ -152,7 +181,7 @@ mod tests {
     #[test]
     fn test_sink_print() {
         let mut sink = Sink::new(vec![0], 0);
-        sink.put(&0, 1, 2, "hello").unwrap();
+        sink.put_sync(&0, 1, 2, "hello").unwrap();
         // sanity check
         println!("{:?}", sink);
     }
@@ -160,10 +189,10 @@ mod tests {
     #[test]
     fn test_up_to() {
         let mut sink = Sink::new(vec![1, 2], 0);
-        sink.put(&1, 3, 0, "yo").unwrap();
-        assert_eq!(sink.synced_up_to(), 0);
-        sink.put(&2, 4, 0, "hi").unwrap();
-        assert_eq!(sink.synced_up_to(), 3);
+        sink.put_sync(&1, 3, 0, "yo").unwrap();
+        assert!(sink.synced_including().is_none());
+        sink.put_sync(&2, 4, 0, "hi").unwrap();
+        assert_eq!(sink.synced_including().unwrap(), 2);
     }
 
     use std::sync::Arc;
@@ -171,26 +200,26 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
-    async fn test_wait_util() -> Result<()> {
+    async fn test_wait_until_included() -> Result<()> {
         let sink = Arc::new(Mutex::new(Sink::new(vec![1, 2], 0)));
         let sink1 = sink.clone();
         let sink2 = sink.clone();
         spawn(async move {
             sleep(Duration::new(0, 100)).await;
             for i in 1..10 {
-                sink1.lock().await.put(&1, i, 0, i).unwrap();
+                sink1.lock().await.put_sync(&1, i, 0, i).unwrap();
             }
         });
         spawn(async move {
             sleep(Duration::new(0, 100)).await;
             for i in 1..8 {
-                sink2.lock().await.put(&2, i, 0, i).unwrap();
+                sink2.lock().await.put_sync(&2, i, 0, i).unwrap();
             }
         });
-        assert_eq!(sink.lock().await.synced_up_to(), 0);
-        println!("Before waiting {}", sink.lock().await.synced_up_to());
-        Sink::wait_until_at(sink.clone(), 7).await;
-        assert_eq!(sink.lock().await.synced_up_to(), 7);
+        assert!(sink.lock().await.synced_including().is_none());
+        println!("Before waiting {:?}", sink.lock().await.synced_including());
+        Sink::wait_until_included(sink.clone(), 6).await;
+        assert_eq!(sink.lock().await.synced_including().unwrap(), 6);
         Ok(())
     }
 
@@ -199,21 +228,21 @@ mod tests {
     #[test]
     fn test_flush() {
         let mut sink = Sink::new(vec![-7, -5], 0);
-        sink.put(&-7, 1, 0, 0).unwrap();
-        sink.put(&-5, 2, 0, 0).unwrap();
-        let up_to = sink.synced_up_to();
+        sink.put_sync(&-7, 1, 0, 0).unwrap();
+        sink.put_sync(&-5, 2, 0, 0).unwrap();
+        let synced = sink.synced_including().unwrap();
         assert_eq!(
-            sink.flush_up_to(up_to),
+            sink.flush_including(synced),
             vec![(0, HashMap::from([(-5, vec![]), (-7, vec![])]))]
         );
 
-        sink.put(&-7, 1, 1, 42).unwrap();
-        sink.put(&-7, 3, 0, 0).unwrap();
-        sink.put(&-5, 4, 0, 0).unwrap();
+        sink.put_sync(&-7, 1, 1, 42).unwrap();
+        sink.put_sync(&-7, 3, 0, 0).unwrap();
+        sink.put_sync(&-5, 4, 0, 0).unwrap();
 
-        let up_to = sink.synced_up_to();
+        let synced = sink.synced_including().unwrap();
         assert_eq!(
-            sink.flush_up_to(up_to),
+            sink.flush_including(synced),
             vec![
                 (1, HashMap::from([(-5, vec![]), (-7, vec![0, 42])])),
                 (2, HashMap::from([(-5, vec![0]), (-7, vec![])]))

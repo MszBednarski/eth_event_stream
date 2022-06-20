@@ -5,7 +5,6 @@ use crate::{
 };
 use anyhow::Result;
 use ethabi::Event;
-use std::borrow::Borrow;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 use web3::transports::Http;
@@ -17,15 +16,9 @@ pub fn http_web3(http_url: &str) -> Result<api::Web3<web3::transports::Http>> {
     Ok(Web3::new(transport))
 }
 
-pub async fn ws_web3(ws_url: &str) -> Result<api::Web3<web3::transports::WebSocket>> {
-    let transport = transports::WebSocket::new(ws_url).await?;
-    Ok(Web3::new(transport))
-}
-
 #[derive(Debug)]
 pub struct Stream {
     pub http_url: String,
-    pub ws_url: String,
     pub address: Address,
     pub from_block: U64,
     pub to_block: U64,
@@ -37,6 +30,7 @@ pub struct Stream {
     /// used for the filter builder
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
+    web3: Web3<Http>,
 }
 
 impl Stream {
@@ -53,7 +47,6 @@ impl Stream {
 
     pub async fn new(
         http_url: String,
-        ws_url: String,
         address: Address,
         from_block: u64,
         to_block: u64,
@@ -64,13 +57,13 @@ impl Stream {
         let f_contract_address = vec![address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
+        let web3 = Web3::new(Http::new(http_url.as_str())?);
         // I found that 2 block delay usually feeds reliably
         let confirmation_blocks = 2u8;
         let s = Stream {
             block_notify_subscription,
             block_step: 1000,
             http_url,
-            ws_url,
             sink,
             address,
             from_block: U64::from(from_block),
@@ -79,6 +72,7 @@ impl Stream {
             event,
             f_contract_address,
             f_topic,
+            web3,
         };
         Ok(s)
     }
@@ -93,14 +87,9 @@ impl Stream {
 
     /// this cannot get you logs on arbitrary range
     /// this does just one call to eth.logs
-    pub async fn get_logs(
-        &self,
-        web3: &web3::api::Web3<Http>,
-        from_block: &U64,
-        to_block: &U64,
-    ) -> Result<Vec<RichLog>> {
+    pub async fn get_logs(&self, from_block: &U64, to_block: &U64) -> Result<Vec<RichLog>> {
         let filter = self.build_filter(from_block.clone(), to_block.clone());
-        let logs = web3.eth().logs(filter).await?;
+        let logs = self.web3.eth().logs(filter).await?;
         let parsed_log: Vec<RichLog> = logs
             .iter()
             .map(|l| l.make_rich_log(&self.event).unwrap())
@@ -108,33 +97,33 @@ impl Stream {
         Ok(parsed_log)
     }
 
-    async fn put(&self, vals: Vec<RichLog>) -> Result<()> {
+    /// end block inclusive
+    async fn put(&self, vals: Vec<RichLog>, end_block: u64) -> Result<()> {
         self.sink.lock().await.put_multiple(
+            &self.address,
             vals.iter()
-                .map(|l| {
-                    (
-                        self.address.borrow(),
-                        l.block_number.as_u64(),
-                        l.log_index.as_u128(),
-                        l.to_owned(),
-                    )
-                })
+                .map(|l| (l.block_number.as_u64(), l.log_index.as_u128(), l.to_owned()))
                 .collect(),
+            end_block,
         )
+    }
+
+    async fn get_and_put_logs(&self, start: &U64, end: &U64) -> Result<()> {
+        let logs = self.get_logs(start, end).await?;
+        self.put(logs, end.as_u64()).await
     }
 
     /// gets logs that are old enough to be finalized for sure
     /// streams it through sender to consoomers
     async fn stream_historical_logs(&self, from_block: U64, to_block: U64) -> Result<()> {
-        let web3 = http_web3(&self.http_url)?;
         // get in batches of size block_step
         let mut start = from_block;
-        while start < to_block {
+        while start <= to_block {
             let mut end = start + self.block_step;
             if end > to_block {
                 end = to_block
             }
-            self.put(self.get_logs(&web3, &start, &end).await?).await?;
+            self.get_and_put_logs(&start, &end).await?;
             start = start + self.block_step + 1u64;
         }
         Ok(())
@@ -142,8 +131,6 @@ impl Stream {
 
     /// streams live blocks from_block inclusive
     async fn stream_live_logs(&mut self, from_block: U64, to_block: U64) -> Result<()> {
-        let web3 = http_web3(&self.http_url)?;
-
         let mut get_from = from_block;
         while self.block_notify_subscription.changed().await.is_ok() {
             let cur_block = *self.block_notify_subscription.borrow();
@@ -155,8 +142,7 @@ impl Stream {
             if safe_block < get_from {
                 panic!("Something went wrong with block order.");
             }
-            self.put(self.get_logs(&web3, &get_from, &safe_block).await?)
-                .await?;
+            self.get_and_put_logs(&get_from, &safe_block).await?;
             // set new get from block
             get_from = safe_block + 1u64;
             // this is the end
@@ -175,19 +161,24 @@ impl Stream {
         // set the stream mode to live or historical
         // based on the users request
         let cur_block_number = web3.eth().block_number().await?;
-        let mut safe_last_historical = self.to_block;
-        // if we need to stream live too
-        if cur_block_number < self.to_block {
-            safe_last_historical = cur_block_number - self.confirmation_blocks;
+        // bool if we need to stream live logs too
+        // the -1 is due to the sink needing 1 more block to flush inclusive
+        let need_live = (cur_block_number - self.confirmation_blocks - 1u64) < self.to_block;
+        if !need_live {
+            // we need to get 1 more block in historical than requested
+            // this is due to the sink needing 1 more block to be sure that it got all events
+            self.stream_historical_logs(self.from_block, self.to_block + 1u64)
+                .await?;
+            return Ok(());
         }
+        // safe last historical block we can get
+        let safe_last_historical = cur_block_number - self.confirmation_blocks;
         self.stream_historical_logs(self.from_block, safe_last_historical)
             .await?;
-
-        let new_from = safe_last_historical + 1u64;
-        if new_from < self.to_block {
-            // stream
-            self.stream_live_logs(new_from, self.to_block).await?;
-        }
+        // now stream the live logs
+        // have to get one more block to ensure sink flushes inclusive
+        self.stream_live_logs(safe_last_historical + 1u64, self.to_block + 1u64)
+            .await?;
         Ok(())
     }
 }
@@ -215,7 +206,6 @@ mod test {
         let sink = Arc::new(Mutex::new(Sink::new(vec![address], from_block)));
         let mut stream = Stream::new(
             http_url,
-            ws_url,
             address,
             from_block,
             to_block,
@@ -243,11 +233,11 @@ mod test {
 
         tokio::spawn(async move { stream.block_stream().await });
 
-        Sink::wait_until_at(sink.clone(), to_block).await;
+        Sink::wait_until_included(sink.clone(), to_block).await;
 
         let mut all_logs = Vec::new();
 
-        let results = sink.lock().await.flush_up_to(to_block);
+        let results = sink.lock().await.flush_including(to_block);
         // println!("{:?}", sink.lock().await);
         for (block_number, mut entry) in results {
             let block_logs = entry.get_mut(&addr).unwrap();
@@ -255,7 +245,7 @@ mod test {
             all_logs.append(block_logs);
         }
 
-        assert_eq!(all_logs.len(), 50);
+        assert_eq!(all_logs.len(), 56);
 
         Ok(())
     }

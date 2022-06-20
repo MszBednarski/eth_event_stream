@@ -72,8 +72,8 @@ async fn process_batch(
     sink: &Arc<Mutex<Sink<Address, RichLog>>>,
 ) {
     println!("{}", block_target);
-    Sink::wait_until_at(sink.clone(), block_target).await;
-    let res = sink.lock().await.flush_up_to(block_target);
+    Sink::wait_until_included(sink.clone(), block_target).await;
+    let res = sink.lock().await.flush_including(block_target);
     for (number, entry) in res {
         let transfers = process_erc20_transfer(address, entry);
         println!("==> Block {}. Got logs. {}", number, transfers.len());
@@ -100,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
     let sink = Arc::new(Mutex::new(Sink::new(vec![contract_address], from_block)));
     let mut stream = Stream::new(
         http_url,
-        ws_url,
         contract_address,
         from_block,
         to_block,
@@ -109,6 +108,7 @@ async fn main() -> anyhow::Result<()> {
         sink.clone(),
     )
     .await?;
+    stream.confirmation_blocks(3);
 
     tokio::spawn(async move { stream.block_stream().await });
 
