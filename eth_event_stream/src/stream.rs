@@ -50,7 +50,7 @@ impl Stream {
         address: Address,
         from_block: u64,
         to_block: u64,
-        event_declaration: &'static str,
+        event_declaration: String,
         block_notify_subscription: watch::Receiver<U64>,
         sink: Arc<Mutex<Sink<Address, RichLog>>>,
     ) -> Result<Stream> {
@@ -204,12 +204,14 @@ mod test {
         let to_block = from_block + 8;
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
         let sink = Arc::new(Mutex::new(Sink::new(vec![address], from_block)));
+        let decl =
+            "event Transfer(address indexed from, address indexed to, uint value)".to_string();
         let mut stream = Stream::new(
             http_url,
             address,
             from_block,
             to_block,
-            "event Transfer(address indexed from, address indexed to, uint value)",
+            decl,
             notify.subscribe(),
             sink.clone(),
         )

@@ -59,7 +59,7 @@ mod test {
     #[test]
     fn test_make_rich_log() -> Result<()> {
         let event = event_from_declaration(
-            "event Transfer(address indexed from, address indexed to, uint value)",
+            "event Transfer(address indexed from, address indexed to, uint value)".to_string(),
         )?;
         let address = Address::from_slice(
             hex::decode("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48")?.as_slice(),

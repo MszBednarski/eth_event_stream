@@ -1,3 +1,5 @@
+use std::borrow::Borrow;
+
 use ethabi::{Event, EventParam, ParamType};
 use nom::branch::alt;
 use nom::bytes::complete::take_while;
@@ -73,9 +75,9 @@ fn parse_event_declaration(
     Ok((input, (name, params, anonymous)))
 }
 
-pub fn event_from_declaration(declaration: &'static str) -> anyhow::Result<Event> {
-    let decb = declaration.as_bytes();
-    let (input, (name, params, anonymous)) = parse_event_declaration(decb)?;
+pub fn event_from_declaration(declaration: String) -> anyhow::Result<Event> {
+    let decb = declaration.into_bytes() ;
+    let (input, (name, params, anonymous)) = parse_event_declaration(decb.as_slice()).unwrap();
     if input.len() > 0 {
         return Err(anyhow::anyhow!(
             "The input event declaration has trailing data [{}]",
@@ -184,7 +186,7 @@ mod test {
         };
         assert_eq!(
             event_from_declaration(
-                "event Transfer(address indexed from, address indexed to, uint value)"
+                "event Transfer(address indexed from, address indexed to, uint value)".to_string()
             )?,
             erc20_transfer_event
         );

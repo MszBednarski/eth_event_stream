@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
         contract_address,
         from_block,
         to_block,
-        "event Transfer(address indexed from, address indexed to, uint value)",
+        "event Transfer(address indexed from, address indexed to, uint value)".to_string(),
         notify.subscribe(),
         sink.clone(),
     )
