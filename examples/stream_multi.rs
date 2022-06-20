@@ -10,15 +10,15 @@ use std::{collections::HashMap, env, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Debug)]
-struct Erc20Transfer {
-    from: Address,
-    to: Address,
-    value: U256,
+struct ParsedEvent<T> {
+    data: T,
     block_number: U64,
     transaction_hash: H256,
     address: Address,
     log_index: U256,
 }
+
+type Erc20Transfer = ParsedEvent<(Address, Address, U256)>;
 
 fn cast_addr(t: Token) -> Address {
     match t {
@@ -37,7 +37,7 @@ fn cast_u256(t: Token) -> U256 {
 fn process_erc20_transfer(
     at: &Address,
     entries: HashMap<Address, Vec<RichLog>>,
-) -> Vec<Erc20Transfer> {
+) -> Vec<ParsedEvent<(Address, Address, U256)>> {
     let logs = entries.get(at).unwrap();
     logs.to_owned()
         .iter()
@@ -50,10 +50,12 @@ fn process_erc20_transfer(
                 log_index,
                 ..
             } => match &params[..] {
-                [from, to, value] => Some(Erc20Transfer {
-                    from: cast_addr(from.value.to_owned()),
-                    to: cast_addr(to.value.to_owned()),
-                    value: cast_u256(value.value.to_owned()),
+                [from, to, value] => Some(ParsedEvent {
+                    data: (
+                        cast_addr(from.value.to_owned()),
+                        cast_addr(to.value.to_owned()),
+                        cast_u256(value.value.to_owned()),
+                    ),
                     address: *address,
                     block_number: *block_number,
                     transaction_hash: *transaction_hash,
@@ -77,7 +79,7 @@ async fn process_batch(
     for (number, entry) in res {
         let transfers = process_erc20_transfer(address, entry);
         println!("==> Block {}. Got logs. {}", number, transfers.len());
-        // println!("First log {:?}", transfers.first());
+        println!("First log {:?}", transfers.first());
     }
 }
 
