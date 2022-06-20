@@ -2,4 +2,5 @@
 
 members = [
     "eth_event_stream",
+    "eth_event_macro"
 ]
