@@ -4,7 +4,6 @@ use eth_event_stream::{
     stream::{http_web3, Stream},
 };
 use std::{env, sync::Arc};
-use tokio::sync::broadcast;
 use tokio::sync::Mutex;
 use web3::types::Address;
 

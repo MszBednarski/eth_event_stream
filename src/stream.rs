@@ -197,9 +197,8 @@ mod test {
     use super::Stream;
     use crate::{data_feed::block::BlockNotify, rich_log::RichLog, sink::Sink};
     use anyhow::Result;
-    use std::collections::HashMap;
+    use std::env;
     use std::sync::Arc;
-    use std::{borrow::BorrowMut, env};
     use tokio::sync::Mutex;
     use web3::types::Address;
 

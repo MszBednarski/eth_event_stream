@@ -6,8 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::watch;
-
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::Mutex;
 
 /// The stream is feeding us events in block order
 /// This datastructure needs to be able to:

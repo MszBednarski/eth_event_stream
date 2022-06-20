@@ -31,11 +31,7 @@ impl MakesRichLog for web3::types::Log {
         }
         // log needed to parse Log.data
         let raw_log = RawLog {
-            topics: self
-                .topics
-                .iter()
-                .map(|o| ethabi::ethereum_types::H256::from(o.0))
-                .collect(),
+            topics: self.topics.clone(),
             data: self.data.0.clone(),
         };
         let parsed_log = event.parse_log(raw_log)?;
