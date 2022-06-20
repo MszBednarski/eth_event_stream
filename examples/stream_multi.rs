@@ -66,6 +66,21 @@ fn process_erc20_transfer(
         .collect()
 }
 
+async fn process_batch(
+    block_target: u64,
+    address: &Address,
+    sink: &Arc<Mutex<Sink<Address, RichLog>>>,
+) {
+    println!("{}", block_target);
+    Sink::wait_until_at(sink.clone(), block_target).await;
+    let res = sink.lock().await.flush_up_to(block_target);
+    for (number, entry) in res {
+        let transfers = process_erc20_transfer(address, entry);
+        println!("==> Block {}. Got logs. {}", number, transfers.len());
+        // println!("First log {:?}", transfers.first());
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let http_url = env::var("HTTP_NODE_URL")?;
@@ -75,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
     let contract_address = Address::from_slice(hex::decode(&usdc[2..])?.as_slice());
     let cur_block = web3.eth().block_number().await?.as_u64();
     let from_block = cur_block - 40;
-    let to_block = cur_block + 6;
+    let to_block = cur_block + 4;
     println!(
         "Going to stream from block {} to {} inclusive",
         from_block, to_block
@@ -94,19 +109,15 @@ async fn main() -> anyhow::Result<()> {
         sink.clone(),
     )
     .await?;
-    stream.block_step(5);
 
     tokio::spawn(async move { stream.block_stream().await });
 
-    let mut cur = from_block;
-    loop {
-        Sink::wait_until_at(sink.clone(), cur).await;
-        let res = sink.lock().await.flush_up_to(cur);
-        for (number, entry) in res {
-            let transfers = process_erc20_transfer(&contract_address, entry);
-            println!("==> Block {}. Got logs. {}", number, transfers.len());
-            println!("First log {:?}", transfers.first());
-        }
-        cur += 1;
+    let step = 5;
+    for cur in ((from_block + step)..=to_block).step_by(5) {
+        process_batch(cur, &contract_address, &sink).await
     }
+    if to_block - from_block % step != 0 {
+        process_batch(to_block, &contract_address, &sink).await
+    }
+    Ok(())
 }

@@ -60,9 +60,7 @@ impl BlockNotify {
             }
         });
 
-        Ok(BlockNotify {
-            ps,
-        })
+        Ok(BlockNotify { ps })
     }
 
     pub fn subscribe(&self) -> Receiver<U64> {

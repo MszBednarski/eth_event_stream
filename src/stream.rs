@@ -64,6 +64,8 @@ impl Stream {
         let f_contract_address = vec![address];
         let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
+        // I found that 2 block delay usually feeds reliably
+        let confirmation_blocks = 2u8;
         let s = Stream {
             block_notify_subscription,
             block_step: 1000,
@@ -73,8 +75,7 @@ impl Stream {
             address,
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
-            // I found that 2 block delay usually feeds reliably
-            confirmation_blocks: 2u8,
+            confirmation_blocks,
             event,
             f_contract_address,
             f_topic,
@@ -87,19 +88,18 @@ impl Stream {
     }
 
     pub fn confirmation_blocks(&mut self, new_confirmation: u8) {
-        self.confirmation_blocks = new_confirmation
+        self.confirmation_blocks = new_confirmation;
     }
 
     /// this cannot get you logs on arbitrary range
     /// this does just one call to eth.logs
-    /// sorts logs in ascending order the way they were emmited
     pub async fn get_logs(
         &self,
         web3: &web3::api::Web3<Http>,
-        from_block: U64,
-        to_block: U64,
+        from_block: &U64,
+        to_block: &U64,
     ) -> Result<Vec<RichLog>> {
-        let filter = self.build_filter(from_block, to_block);
+        let filter = self.build_filter(from_block.clone(), to_block.clone());
         let logs = web3.eth().logs(filter).await?;
         let parsed_log: Vec<RichLog> = logs
             .iter()
@@ -134,7 +134,7 @@ impl Stream {
             if end > to_block {
                 end = to_block
             }
-            self.put(self.get_logs(&web3, start, end).await?).await?;
+            self.put(self.get_logs(&web3, &start, &end).await?).await?;
             start = start + self.block_step + 1u64;
         }
         Ok(())
@@ -147,20 +147,21 @@ impl Stream {
         let mut get_from = from_block;
         while self.block_notify_subscription.changed().await.is_ok() {
             let cur_block = *self.block_notify_subscription.borrow();
+            // the block that we can safely get finalized events
             let mut safe_block = cur_block - self.confirmation_blocks;
             if safe_block > to_block {
                 safe_block = to_block;
             }
-            if safe_block > get_from {
-                self.put(self.get_logs(&web3, get_from, safe_block).await?)
-                    .await?;
-                // set new get from block
-                get_from = safe_block + 1u64;
-                // this is the end
-                if safe_block == to_block {
-                    // flush remaining
-                    return Ok(());
-                }
+            if safe_block < get_from {
+                panic!("Something went wrong with block order.");
+            }
+            self.put(self.get_logs(&web3, &get_from, &safe_block).await?)
+                .await?;
+            // set new get from block
+            get_from = safe_block + 1u64;
+            // this is the end
+            if safe_block == to_block {
+                return Ok(());
             }
         }
         panic!("Block notify subscription failed.");
@@ -184,7 +185,6 @@ impl Stream {
 
         let new_from = safe_last_historical + 1u64;
         if new_from < self.to_block {
-            println!("Streaming live");
             // stream
             self.stream_live_logs(new_from, self.to_block).await?;
         }

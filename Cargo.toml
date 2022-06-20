@@ -12,6 +12,3 @@ ethabi = "16.0.0"
 nom = "7.1.1"
 tokio-retry = "0.3"
 ethereum-types = "0.12.1"
-
-[[example]]
-name = "stream_live"
