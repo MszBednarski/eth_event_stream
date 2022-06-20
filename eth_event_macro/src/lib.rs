@@ -22,6 +22,7 @@ fn match_event_param_to_rust_type(e: &EventParam) -> String {
 /// in the same order as the event definition
 fn dynamic_fields_from_data(event: &Event) -> String {
     let mut params_vec: Vec<String> = vec![];
+    // used to tell the user what is the sig of the eth event on the data field
     let mut doc_vec: Vec<String> = vec![];
     for e in &event.inputs {
         params_vec.push(match_event_param_to_rust_type(e));
