@@ -1,20 +1,74 @@
-use eth_event_stream::events::event_from_declaration;
+mod events;
+use crate::events::event_from_declaration;
 use ethabi::{Event, EventParam, ParamType};
 use proc_macro::{self, TokenStream};
 use quote::quote;
+use std::convert::Into;
 use syn::parse::Parser;
 use syn::{parse_macro_input, DeriveInput};
+
 
 /// matches the event params from declaration to corresponding types that need to be in the tuple
 /// made by the tuple
 /// TODO: extend to all solidity event types
-fn match_event_param_to_rust_type(e: &EventParam) -> String {
+fn event_param_to_ethereum_type(e: &EventParam) -> String {
     let eth_type = match e.kind {
         ParamType::Address => "Address".to_string(),
         ParamType::Uint(x) => format!("U{}", x),
-        _ => panic!("param type {:?} is not supported", e),
+        _ => panic!("param type {:?} is not implemented", e),
     };
     format!("ethereum_types::{}", eth_type).to_string()
+}
+
+fn event_param_to_ethabi_type(e: &EventParam) -> String {
+    let ethabi_type = match e.kind {
+        ParamType::Address => "Address".to_string(),
+        ParamType::Uint(x) => format!("Uint({})", x),
+        _ => panic!("param type {:?} is not implemented", e),
+    };
+    format!("ethabi::ParamType::{}", ethabi_type)
+}
+
+/// outputs a syntax string representation of the instantiation of the struct
+/// given struct instance to move an instance of event from function to macro output
+trait IntoSyntaxString {
+    fn into_syntax_string(&self) -> String;
+}
+
+impl IntoSyntaxString for ethabi::Event {
+    fn into_syntax_string(&self) -> String {
+        let mut event_inputs: Vec<String> = Vec::new();
+        // create strings of all event params
+        for input in &self.inputs {
+            // push each param converted to string
+            event_inputs.push(format!(
+                "
+ethabi::EventParam {{
+    name: \"{}\".to_string(),
+    kind: {},
+    indexed: {},
+}}",
+                input.name,
+                event_param_to_ethabi_type(input),
+                input.indexed
+            ))
+        }
+        let event_declaration = format!(
+            "
+pub fn event() -> ethabi::Event {{
+    ethabi::Event {{
+        name: \"{}\".to_string(),
+        inputs: vec![{}],
+        anonymous: {},
+    }}
+}}
+",
+            self.name,
+            event_inputs.join(","),
+            self.anonymous
+        );
+        event_declaration
+    }
 }
 
 /// returns token stream to be parsed as a struct field that
@@ -25,7 +79,7 @@ fn dynamic_fields_from_data(event: &Event) -> String {
     // used to tell the user what is the sig of the eth event on the data field
     let mut doc_vec: Vec<String> = vec![];
     for e in &event.inputs {
-        params_vec.push(match_event_param_to_rust_type(e));
+        params_vec.push(event_param_to_ethereum_type(e));
         doc_vec.push(format!("{}: {:?}", e.name.clone(), e.kind))
     }
     format!(
@@ -45,7 +99,7 @@ fn dynamic_fields_from_data(event: &Event) -> String {
 pub fn event(declaration: TokenStream, input: TokenStream) -> TokenStream {
     // FIRST get the defined solidity ethereum event
     let declaration_str = declaration.to_string();
-    println!("event {}", declaration_str);
+    // println!("event {}", declaration_str);
     let event = event_from_declaration(declaration_str.replace("\"", "")).unwrap();
 
     // NEXT parse the input struct AST
@@ -87,48 +141,29 @@ pub fn event(declaration: TokenStream, input: TokenStream) -> TokenStream {
         _ => panic!("`event` has to be used with structs."),
     }
 
-    // let _type = _args_str.trim();
-    // let types: Vec<&str> = _args_str.split(",").into_iter().map(|s| s.trim()).collect();
-    // let mut pub_field = "pub a:".to_string();
-    // let field_type: proc_macro::TokenStream = _args_str.parse().unwrap();
-    // pub_field.push_str(_args_str.as_str());
+    // get the name of the struct
+    let struct_name = ast.ident.to_string();
 
-    // println!("{:?}", types);
-    // println!("{:?}", _type);
-    // // println!("{:?}", tuple_tokenstream);
-    // println!("ASEFASFE");
-    // for a in &ast.attrs {
-    //     println!("{}", a.tokens.to_string())
-    // }
-    // match &mut ast.data {
-    //     syn::Data::Struct(ref mut struct_data) => {
-    //         match &mut struct_data.fields {
-    //             syn::Fields::Named(fields) => {
-    //                 // add `pub a` field to the struct
-    //                 fields.named.push(
-    //                     syn::Field::parse_named
-    //                         .parse2(pub_field.parse().unwrap())
-    //                         .unwrap(),
-    //                 );
-    //             }
-    //             _ => (),
-    //         }
-    //     }
-    //     _ => panic!("`add_field` has to be used with structs "),
-    // }
+    // println!("{:?}", event);
+    // println!("{}", event.into_syntax_string());
 
-    // this works btw
-    // let empty: TokenStream = quote! {impl Foo {fn say_hello() {println!("helo")}}}.into();
-    // let mut impl_ast = parse_macro_input!(empty as DeriveInput);
+    // create the impl
+    let implementation = format!(
+        "
+   impl {} {{
+        {}
+   }} 
+    ",
+        struct_name,
+        event.into_syntax_string()
+    );
 
+    // add an impl for our event struct
+    let _impl: TokenStream = implementation.parse().unwrap();
+    // let mut impl_ast = parse_macro_input!(_impl as DeriveInput);
     let mut output: TokenStream = quote! { #ast }.into();
-
-    // output.extend(empty.into_iter());
-
-    // match &mut token_stream {
-    //     TokenStream(bridge) => {
-
-    //     }
-    // }
+    // add the impl after the struct scope
+    output.extend(_impl.into_iter());
+    // return the transformed syntax
     output
 }

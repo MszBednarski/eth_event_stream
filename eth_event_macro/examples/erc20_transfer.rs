@@ -6,6 +6,7 @@ struct Erc20Transfer {}
 
 fn main() {
     use ethereum_types::{Address, H256, U256, U64};
+    Erc20Transfer::event();
     let e = Erc20Transfer {
         data: (Address::zero(), Address::zero(), U256::zero()),
         block_number: U64::zero(),
