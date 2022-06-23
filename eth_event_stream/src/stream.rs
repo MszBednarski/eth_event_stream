@@ -85,6 +85,14 @@ impl Stream {
     pub async fn get_logs(&self, from_block: &U64, to_block: &U64) -> Result<Vec<Log>> {
         let filter = self.build_filter(from_block.clone(), to_block.clone());
         let logs = self.web3.eth().logs(filter).await?;
+        for log in &logs {
+            if log.is_removed() {
+                panic!(
+                    "Encountered removed block, increase confirmation blocks number. {:?}",
+                    log
+                )
+            }
+        }
         Ok(logs)
     }
 

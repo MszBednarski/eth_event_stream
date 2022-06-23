@@ -5,7 +5,6 @@ use std::cmp::{max, Ord};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::hash::Hash;
-use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
@@ -106,6 +105,11 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
             source_vals,
             sender,
         }
+    }
+
+    /// returns a new threadsafe sink
+    pub fn new_threadsafe(sources: Vec<A>, from_block: u64) -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Sink::new(sources, from_block)))
     }
 
     /// returns inclusive block up to which the synced data can be flushed / was flushed

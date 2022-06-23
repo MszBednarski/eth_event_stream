@@ -1,11 +1,10 @@
 use eth_event_stream::{
+    address,
     data_feed::block::BlockNotify,
     sink::{stream_synced_blocks, Sink},
     stream::Stream,
 };
-use ethereum_types::Address;
-use std::{env, sync::Arc};
-use tokio::sync::Mutex;
+use std::env;
 use web3::{transports::Http, Web3};
 
 #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
@@ -17,8 +16,8 @@ async fn main() -> anyhow::Result<()> {
     let http_url = env::var("HTTP_NODE_URL")?;
     let ws_url = env::var("WS_NODE_URL")?;
     let web3 = Web3::new(Http::new(&http_url).unwrap());
-    let usdc: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
-    let contract_address = Address::from_slice(hex::decode(&usdc[2..])?.as_slice());
+    // usdc
+    let address = address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
     let cur_block = web3.eth().block_number().await?.as_u64();
     let from_block = cur_block - 40;
     let to_block = cur_block + 4;
@@ -30,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     let notify = BlockNotify::new(&http_url, &ws_url).await?;
     let mut stream = Stream::new(
         http_url,
-        contract_address,
+        address,
         from_block,
         to_block,
         Erc20Transfer::event(),
@@ -38,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let signature = stream.signature;
-    let sink = Arc::new(Mutex::new(Sink::new(vec![stream.signature], from_block)));
+    let sink = Sink::new_threadsafe(vec![stream.signature], from_block);
     stream.bind_sink(sink.clone());
     stream.confirmation_blocks(3);
 
