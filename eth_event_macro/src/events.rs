@@ -103,7 +103,7 @@ pub fn event_from_declaration(declaration: String) -> anyhow::Result<Event> {
                         "uint" => ParamType::Uint(256),
                         "uint256" => ParamType::Uint(256),
                         "bool" => ParamType::Bool,
-                        _ => panic!("not supported type"),
+                        _ => todo!(),
                     },
                     indexed,
                 },
