@@ -1,7 +1,6 @@
 use ethabi::{Event, EventParam, ParamType};
 use nom::branch::alt;
 use nom::bytes::complete::take_while;
-use nom::multi::many_m_n;
 use nom::sequence::tuple;
 use nom::{
     bytes::complete::{tag, take_until},
@@ -12,8 +11,11 @@ use nom::{
 };
 
 fn name_parser(input: &[u8]) -> IResult<&[u8], &[u8]> {
-    let mut p = tuple((tag("event"), many_m_n(1, 10, tag(" ")), take_until("(")));
-    let (input, (_, _, name)) = p(input)?;
+    let p = take_until("(");
+    let (input, name) = p(input)?;
+    if name.starts_with(b"event") {
+        panic!("`event` keyword should be ommited");
+    }
     Ok((input, name))
 }
 
@@ -38,7 +40,7 @@ fn param_parser(input: &[u8]) -> IResult<&[u8], (&[u8], &[u8], &[u8])> {
 
 /// the solidity declaration string will be consumed in the process
 /// Example declarations:
-/// event Transfer(address indexed from, address indexed to, uint value)
+/// Transfer(address indexed from, address indexed to, uint value)
 /// event Start(uint start, uint middle, uint end) anonymous;
 fn parse_event_declaration(
     input: &[u8],
@@ -121,8 +123,7 @@ mod test {
 
     #[test]
     fn test_parse_event_declaration() -> anyhow::Result<()> {
-        let decl =
-            "event Transfer(address indexed from, address indexed to, uint value)".as_bytes();
+        let decl = "Transfer(address indexed from, address indexed to, uint value)".as_bytes();
         assert_eq!(
             name_parser(decl),
             Ok((
@@ -184,7 +185,7 @@ mod test {
         };
         assert_eq!(
             event_from_declaration(
-                "event Transfer(address indexed from, address indexed to, uint value)".to_string()
+                "Transfer(address indexed from, address indexed to, uint value)".to_string()
             )?,
             erc20_transfer_event
         );

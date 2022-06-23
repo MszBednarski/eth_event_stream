@@ -1,83 +1,32 @@
 use eth_event_stream::{
     data_feed::block::BlockNotify,
-    rich_log::RichLog,
     sink::Sink,
     stream::{http_web3, Stream},
 };
-use ethabi::Token;
-use ethereum_types::{Address, H256, U256, U64};
-use std::{collections::HashMap, env, sync::Arc};
+use ethereum_types::Address;
+use std::{env, sync::Arc};
 use tokio::sync::Mutex;
+use web3::types::Log;
 
+#[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
 #[derive(Debug)]
-struct ParsedEvent<T> {
-    data: T,
-    block_number: U64,
-    transaction_hash: H256,
-    address: Address,
-    log_index: U256,
-}
-
-type Erc20Transfer = ParsedEvent<(Address, Address, U256)>;
-
-fn cast_addr(t: Token) -> Address {
-    match t {
-        ethabi::Token::Address(a) => Address::from_slice(a.as_bytes()),
-        _ => panic!("Could not cast {:?} to address", t),
-    }
-}
-
-fn cast_u256(t: Token) -> U256 {
-    match t {
-        ethabi::Token::Uint(v) => U256::from(v),
-        _ => panic!("Could not cast {:?} to address", t),
-    }
-}
-
-fn process_erc20_transfer(
-    at: &Address,
-    entries: HashMap<Address, Vec<RichLog>>,
-) -> Vec<ParsedEvent<(Address, Address, U256)>> {
-    let logs = entries.get(at).unwrap();
-    logs.to_owned()
-        .iter()
-        .map(|l| match &l {
-            RichLog {
-                params,
-                address,
-                block_number,
-                transaction_hash,
-                log_index,
-                ..
-            } => match &params[..] {
-                [from, to, value] => Some(ParsedEvent {
-                    data: (
-                        cast_addr(from.value.to_owned()),
-                        cast_addr(to.value.to_owned()),
-                        cast_u256(value.value.to_owned()),
-                    ),
-                    address: *address,
-                    block_number: *block_number,
-                    transaction_hash: *transaction_hash,
-                    log_index: *log_index,
-                }),
-                _ => None,
-            },
-        })
-        .filter_map(|a| a)
-        .collect()
-}
+struct Erc20Transfer {}
 
 async fn process_batch(
     block_target: u64,
     address: &Address,
-    sink: &Arc<Mutex<Sink<Address, RichLog>>>,
+    sink: &Arc<Mutex<Sink<Address, Log>>>,
 ) {
     println!("{}", block_target);
     Sink::wait_until_included(sink.clone(), block_target).await;
     let res = sink.lock().await.flush_including(block_target);
     for (number, entry) in res {
-        let transfers = process_erc20_transfer(address, entry);
+        let transfers: Vec<Erc20Transfer> = entry
+            .get(address)
+            .unwrap()
+            .iter()
+            .map(|l| Erc20Transfer::from(l.to_owned()))
+            .collect();
         println!("==> Block {}. Got logs. {}", number, transfers.len());
         println!("First log {:?}", transfers.first());
     }
@@ -105,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         contract_address,
         from_block,
         to_block,
-        "event Transfer(address indexed from, address indexed to, uint value)".to_string(),
+        Erc20Transfer::event(),
         notify.subscribe(),
         sink.clone(),
     )

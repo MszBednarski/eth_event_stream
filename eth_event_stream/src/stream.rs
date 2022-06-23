@@ -1,14 +1,10 @@
-use crate::{
-    events::event_from_declaration,
-    rich_log::{MakesRichLog, RichLog},
-    sink::Sink,
-};
+use crate::sink::Sink;
 use anyhow::Result;
 use ethabi::Event;
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};
 use web3::transports::Http;
-use web3::types::{Address, BlockNumber, Filter, FilterBuilder, H256, U64};
+use web3::types::{Address, BlockNumber, Filter, FilterBuilder, Log, H256, U64};
 use web3::{api, transports, Web3};
 
 pub fn http_web3(http_url: &str) -> Result<api::Web3<web3::transports::Http>> {
@@ -23,7 +19,7 @@ pub struct Stream {
     pub from_block: U64,
     pub to_block: U64,
     confirmation_blocks: u8,
-    sink: Arc<Mutex<Sink<Address, RichLog>>>,
+    sink: Arc<Mutex<Sink<Address, Log>>>,
     block_step: u64,
     block_notify_subscription: watch::Receiver<U64>,
     event: Event,
@@ -50,12 +46,11 @@ impl Stream {
         address: Address,
         from_block: u64,
         to_block: u64,
-        event_declaration: String,
+        event: Event,
         block_notify_subscription: watch::Receiver<U64>,
-        sink: Arc<Mutex<Sink<Address, RichLog>>>,
+        sink: Arc<Mutex<Sink<Address, Log>>>,
     ) -> Result<Stream> {
         let f_contract_address = vec![address];
-        let event = event_from_declaration(event_declaration)?;
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
         let web3 = Web3::new(Http::new(http_url.as_str())?);
         // I found that 2 block delay usually feeds reliably
@@ -87,22 +82,24 @@ impl Stream {
 
     /// this cannot get you logs on arbitrary range
     /// this does just one call to eth.logs
-    pub async fn get_logs(&self, from_block: &U64, to_block: &U64) -> Result<Vec<RichLog>> {
+    pub async fn get_logs(&self, from_block: &U64, to_block: &U64) -> Result<Vec<Log>> {
         let filter = self.build_filter(from_block.clone(), to_block.clone());
         let logs = self.web3.eth().logs(filter).await?;
-        let parsed_log: Vec<RichLog> = logs
-            .iter()
-            .map(|l| l.make_rich_log(&self.event).unwrap())
-            .collect();
-        Ok(parsed_log)
+        Ok(logs)
     }
 
     /// end block inclusive
-    async fn put(&self, vals: Vec<RichLog>, end_block: u64) -> Result<()> {
+    async fn put(&self, vals: Vec<Log>, end_block: u64) -> Result<()> {
         self.sink.lock().await.put_multiple(
             &self.address,
             vals.iter()
-                .map(|l| (l.block_number.as_u64(), l.log_index.as_u128(), l.to_owned()))
+                .map(|l| {
+                    (
+                        l.block_number.unwrap().as_u64(),
+                        l.log_index.unwrap().as_u128(),
+                        l.to_owned(),
+                    )
+                })
                 .collect(),
             end_block,
         )
@@ -186,16 +183,16 @@ impl Stream {
 #[cfg(test)]
 mod test {
     use super::Stream;
-    use crate::{data_feed::block::BlockNotify, rich_log::RichLog, sink::Sink};
+    use crate::{data_feed::block::BlockNotify, sink::Sink};
     use anyhow::Result;
     use std::env;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use web3::types::Address;
+    use web3::types::{Address, Log};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    async fn test_stream() -> Result<(Stream, Arc<Mutex<Sink<Address, RichLog>>>, u64)> {
+    async fn test_stream() -> Result<(Stream, Arc<Mutex<Sink<Address, Log>>>, u64)> {
         let http_url = env::var("HTTP_NODE_URL")?;
         let ws_url = env::var("WS_NODE_URL")?;
         let address = Address::from_slice(hex::decode(USDC)?.as_slice());
@@ -204,14 +201,16 @@ mod test {
         let to_block = from_block + 8;
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
         let sink = Arc::new(Mutex::new(Sink::new(vec![address], from_block)));
-        let decl =
-            "event Transfer(address indexed from, address indexed to, uint value)".to_string();
+        #[eth_event_macro::event(
+            "Transfer(address indexed from, address indexed to, uint value)"
+        )]
+        struct Erc20Transfer {}
         let mut stream = Stream::new(
             http_url,
             address,
             from_block,
             to_block,
-            decl,
+            Erc20Transfer::event(),
             notify.subscribe(),
             sink.clone(),
         )

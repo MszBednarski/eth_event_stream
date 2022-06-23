@@ -12,3 +12,4 @@ ethabi = "16.0.0"
 nom = "7.1.1"
 tokio-retry = "0.3"
 ethereum-types = "0.12.1"
+eth_event_macro = { version = "0.1.0", path = "../eth_event_macro" }

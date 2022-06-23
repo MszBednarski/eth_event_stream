@@ -71,14 +71,7 @@ pub fn event() -> ethabi::Event {{
     }
 }
 
-/// gets data field in parsing of the event ex:
-/// ```
-/// let data = (
-///     Erc20Transfer::cast_to_addr(parsed_log.params.get(0).unwrap().value),
-///     Erc20Transfer::cast_to_addr(parsed_log.params.get(1).unwrap().value),
-///     Erc20Transfer::cast_to_uint(parsed_log.params.get(2).unwrap().value),
-/// );
-/// ```
+/// gets data field in parsing of the event
 /// Returns a vector of data getting expressions
 fn get_data_field_parsing(struct_name: &String, e: &Event) -> (Vec<String>, Vec<String>) {
     let mut data_expressions: Vec<String> = Vec::new();
@@ -122,31 +115,7 @@ fn match_token_to_cast_fun(t: &ethabi::ParamType) -> (String, String) {
     }
 }
 
-/// impl From web3 log implementation ex:
-/// ```
-/// impl std::convert::From<web3::types::Log> for Erc20Transfer {
-///     fn from(log: web3::types::Log) -> Self {
-///         let raw_log = ethabi::RawLog {
-///             topics: log.topics.clone(),
-///             data: log.data.0.clone(),
-///         };
-///         let parsed_log = Erc20Transfer::event().parse_log(raw_log).unwrap();
-///         let data = (
-///             cast_addr(parsed_log.params.get(0).unwrap().value),
-///             cast_addr(parsed_log.params.get(1).unwrap().value),
-///             cast_u256(parsed_log.params.get(2).unwrap().value),
-///         );
-///         Erc20Transfer {
-///             block_number: log.block_number.unwrap(),
-///             transaction_hash: log.transaction_hash.unwrap(),
-///             address: log.address,
-///             log_index: log.log_index.unwrap(),
-///             data,
-///         }
-///     }
-/// }
-/// ```
-///
+/// impl From web3 log implementation
 /// Returns the From<web3::types::Log> impl and additional function definitions
 fn get_from_web3_log_impl(struct_name: &String, e: &Event) -> (String, Vec<String>) {
     let (data_expressions, cast_definitions) = get_data_field_parsing(struct_name, e);

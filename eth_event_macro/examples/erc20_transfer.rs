@@ -1,6 +1,6 @@
 use eth_event_macro::event;
 
-#[event("event Transfer(address indexed from, address indexed to, uint value)")]
+#[event("Transfer(address indexed from, address indexed to, uint value)")]
 #[derive(Debug)]
 struct Erc20Transfer {}
 
