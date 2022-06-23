@@ -1,13 +1,12 @@
 mod events;
 use crate::events::event_from_declaration;
-use ethabi::{Address, Event, EventParam, ParamType, Token};
+use ethabi::{Event, EventParam, ParamType};
 use proc_macro::{self, TokenStream};
 use quote::quote;
 use std::collections::HashSet;
 use std::convert::Into;
 use syn::parse::Parser;
 use syn::{parse_macro_input, DeriveInput};
-use web3::types::U256;
 
 /// matches the event params from declaration to corresponding types that need to be in the tuple
 /// made by the tuple
@@ -89,16 +88,16 @@ fn get_data_field_parsing(struct_name: &String, e: &Event) -> (Vec<String>, Vec<
         cast_definitions_set.insert(stream);
 
         data_expressions.push(format!(
-            "{}::{}(parsed_log.params.get({}).unwrap().value)",
+            "{}::{}(&parsed_log.params.get({}).unwrap().value)",
             struct_name, name, index
         ));
     }
-    data_expressions
+    (data_expressions, cast_definitions_set.into_iter().collect())
 }
 
 fn match_token_to_cast_fun(t: &ethabi::ParamType) -> (String, String) {
     let cast_addr = quote! {
-        fn cast_addr(t: ethabi::Token) -> ethabi::Address {
+        fn cast_addr(t: &ethabi::Token) -> ethabi::Address {
             match t {
                 ethabi::Token::Address(a) => ethabi::Address::from_slice(a.as_bytes()),
                 _ => panic!("Could not cast {:?} to address", t),
@@ -106,9 +105,9 @@ fn match_token_to_cast_fun(t: &ethabi::ParamType) -> (String, String) {
         }
     };
     let cast_u256 = quote! {
-        fn cast_u256(t: ethabi::Token) -> web3::U256 {
+        fn cast_u256(t: &ethabi::Token) -> web3::types::U256 {
             match t {
-                ethabi::Token::Uint(v) => web3::U256::from(v),
+                ethabi::Token::Uint(v) => web3::types::U256::from(v),
                 _ => panic!("Could not cast {:?} to address", t),
             }
         }
@@ -150,10 +149,7 @@ fn match_token_to_cast_fun(t: &ethabi::ParamType) -> (String, String) {
 ///
 /// Returns the From<web3::types::Log> impl and additional function definitions
 fn get_from_web3_log_impl(struct_name: &String, e: &Event) -> (String, Vec<String>) {
-    let data_fields = get_data_field_parsing(struct_name, e);
-    let data_expressions: Vec<String> = data_fields.iter().map(|a| a.0.clone()).collect();
-    let data_function_definitions: Vec<String> =
-        data_fields.iter().map(|a| a.1.to_string()).collect();
+    let (data_expressions, cast_definitions) = get_data_field_parsing(struct_name, e);
 
     // the implementation of from
     // a lot of boilerplate
@@ -184,7 +180,7 @@ fn get_from_web3_log_impl(struct_name: &String, e: &Event) -> (String, Vec<Strin
             data_expressions.join(","),
             struct_name
         ),
-        data_function_definitions,
+        cast_definitions,
     )
 }
 
@@ -264,20 +260,22 @@ pub fn event(declaration: TokenStream, input: TokenStream) -> TokenStream {
     // println!("{:?}", event);
     // println!("{}", event.into_syntax_string());
 
+    let (from_impl, cast_definitions) = get_from_web3_log_impl(&struct_name, &event);
     // create the impl
     let implementation = format!(
         "
    impl {} {{
         {}
+        {}
    }} 
     ",
         struct_name,
-        event.into_syntax_string()
+        event.into_syntax_string(),
+        cast_definitions.join("\n")
     );
 
-    let (impl_, res) = get_from_web3_log_impl(&struct_name, &event);
-    println!("{}", impl_);
-    println!("{}", res.join("\n"));
+    // println!("{}", from_impl);
+    // println!("{}", res.join("\n"));
 
     // add an impl for our event struct
     let _impl: TokenStream = implementation.parse().unwrap();
@@ -285,6 +283,9 @@ pub fn event(declaration: TokenStream, input: TokenStream) -> TokenStream {
     let mut output: TokenStream = quote! { #ast }.into();
     // add the impl after the struct scope
     output.extend(_impl.into_iter());
+    let from_impl_token_stream: TokenStream = from_impl.parse().unwrap();
+    // add the from implementation
+    output.extend(from_impl_token_stream.into_iter());
     // return the transformed syntax
     output
 }
