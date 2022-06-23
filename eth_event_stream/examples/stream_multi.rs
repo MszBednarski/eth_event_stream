@@ -1,7 +1,7 @@
 use eth_event_stream::{
     data_feed::block::BlockNotify,
-    sink::Sink,
-    stream::{http_web3, Stream, StreamSignature, StreamSink},
+    sink::{stream_synced_blocks, Sink, StreamSignature, StreamSink, StreamSinkFlush},
+    stream::{http_web3, Stream},
 };
 use ethereum_types::Address;
 use std::{env, sync::Arc};
@@ -11,22 +11,6 @@ use web3::types::Log;
 #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
 #[derive(Debug)]
 struct Erc20Transfer {}
-
-async fn process_batch(block_target: u64, sig: &StreamSignature, sink: &StreamSink) {
-    println!("{}", block_target);
-    Sink::wait_until_included(sink.clone(), block_target).await;
-    let res = sink.lock().await.flush_including(block_target);
-    for (number, entry) in res {
-        let transfers: Vec<Erc20Transfer> = entry
-            .get(sig)
-            .unwrap()
-            .iter()
-            .map(|l| Erc20Transfer::from(l.to_owned()))
-            .collect();
-        println!("==> Block {}. Got logs. {}", number, transfers.len());
-        // println!("First log {:?}", transfers.first());
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -60,12 +44,16 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move { stream.block_stream().await });
 
-    let step = 5;
-    for cur in ((from_block + step)..=to_block).step_by(5) {
-        process_batch(cur, &signature, &sink).await
-    }
-    if to_block - from_block % step != 0 {
-        process_batch(to_block, &signature, &sink).await
-    }
+    stream_synced_blocks(sink, to_block, |(number, entry)| async move {
+        let transfers: Vec<Erc20Transfer> = entry
+            .get(&signature)
+            .unwrap()
+            .iter()
+            .map(|l| Erc20Transfer::from(l.to_owned()))
+            .collect();
+        println!("==> Block {}. Got logs. {}", number, transfers.len());
+        // println!("First log {:?}", transfers.first());
+    })
+    .await;
     Ok(())
 }

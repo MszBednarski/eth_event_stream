@@ -1,4 +1,4 @@
-use crate::sink::Sink;
+use crate::sink::{Sink, StreamSink, StreamSignature};
 use anyhow::Result;
 use ethabi::Event;
 use std::sync::Arc;
@@ -32,8 +32,6 @@ pub struct Stream {
     web3: Web3<Http>,
 }
 
-pub type StreamSignature = (Address, H256);
-pub type StreamSink = Arc<Mutex<Sink<StreamSignature, Log>>>;
 
 impl Stream {
     /// builds filter for one time call to eth.logs
@@ -64,7 +62,7 @@ impl Stream {
             block_notify_subscription,
             block_step: 1000,
             http_url,
-            sink: None,
+            sink: None as Option<StreamSink>,
             address,
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
@@ -222,7 +220,7 @@ mod test {
             notify.subscribe(),
         )
         .await?;
-        let sink = Arc::new(Mutex::new(Sink::new(
+        let sink: StreamSink = Arc::new(Mutex::new(Sink::new(
             vec![stream.signature.clone()],
             from_block,
         )));

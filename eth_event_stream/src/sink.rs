@@ -3,10 +3,13 @@ use anyhow::Result;
 use std::borrow::Borrow;
 use std::cmp::{max, Ord};
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::hash::Hash;
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
+use web3::types::{Address, Log, H256};
 
 /// The stream is feeding us events in block order
 /// This datastructure needs to be able to:
@@ -18,7 +21,7 @@ use tokio::sync::Mutex;
 /// - panic the moment it gets an event from a block it already published
 /// - sort incoming on block level and log level
 #[derive(Debug)]
-pub struct Sink<SourceKey, T> {
+pub struct Sink<SourceKey = StreamSignature, T = Log> {
     store: BTreeMap<SourceKey, BTreeMap<u64, BTreeMap<u128, T>>>,
     sources: Vec<SourceKey>,
     source_vals: HashMap<SourceKey, u64>,
@@ -27,6 +30,61 @@ pub struct Sink<SourceKey, T> {
     from_block: u64,
     ps: PubSub<u64>,
     sender: Arc<watch::Sender<u64>>,
+}
+
+pub type StreamSignature = (Address, H256);
+pub type StreamSink = Arc<Mutex<Sink<StreamSignature, Log>>>;
+/// Stream sink flushes this when flush is called
+/// u64 are blocks
+pub type StreamSinkFlush = Vec<(u64, HashMap<StreamSignature, Vec<Log>>)>;
+// flush of one block at a time
+pub type SingleSyncedFlush = (u64, HashMap<StreamSignature, Vec<Log>>);
+
+/// processes the incoming synced events with the given processing function
+/// and does this in the step size provided
+///
+/// if to_block is smaller than all sinks to_block this function will terminate
+/// otherwise it will hang
+pub async fn stream_synced_buffer<F, Fut>(
+    sink: StreamSink,
+    to_block: u64,
+    step: u64,
+    mut processing_function: F,
+) where
+    F: FnMut(StreamSinkFlush) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let from_block = sink.lock().await.from_block;
+    if step < 1 {
+        panic!("Step cannot be smaller than 1")
+    }
+    for block_target in ((from_block + step)..=to_block).step_by(step as usize) {
+        Sink::wait_until_included(sink.clone(), block_target).await;
+        let res = sink.lock().await.flush_including(block_target);
+        processing_function(res).await;
+    }
+    if to_block - from_block % step != 0 {
+        Sink::wait_until_included(sink.clone(), to_block).await;
+        let res = sink.lock().await.flush_including(to_block);
+        processing_function(res).await;
+    }
+}
+
+/// Streams synced blocks in steps of 1
+pub async fn stream_synced_blocks<F, Fut>(
+    sink: StreamSink,
+    to_block: u64,
+    mut processing_function: F,
+) where
+    F: FnMut(SingleSyncedFlush) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let from_block = sink.lock().await.from_block;
+    for block_target in from_block..=to_block {
+        Sink::wait_until_included(sink.clone(), block_target).await;
+        let res = sink.lock().await.flush_including(block_target);
+        processing_function(res.first().unwrap().to_owned()).await;
+    }
 }
 
 impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
