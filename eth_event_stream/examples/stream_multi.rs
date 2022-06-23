@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     // get their sink
     let sink = factory.get_sink();
 
+    // run the streams on separate threads
     tokio::spawn(async move { usdc_stream.block_stream().await });
     tokio::spawn(async move { weth_stream.block_stream().await });
 

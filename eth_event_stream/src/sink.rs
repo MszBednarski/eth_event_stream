@@ -36,8 +36,10 @@ pub type StreamSink = Arc<Mutex<Sink<StreamSignature, Log>>>;
 /// Stream sink flushes this when flush is called
 /// u64 are blocks
 pub type StreamSinkFlush = Vec<(u64, HashMap<StreamSignature, Vec<Log>>)>;
-// flush of one block at a time
+/// flush of one block at a time
 pub type SingleSyncedFlush = (u64, HashMap<StreamSignature, Vec<Log>>);
+/// flush of synced ordered events from multiple sources
+pub type SyncedEventsFlush = (u64, Vec<Log>);
 
 /// processes the incoming synced events with the given processing function
 /// and does this in the step size provided
@@ -82,6 +84,28 @@ pub async fn stream_synced_blocks<F, Fut>(
     for block_target in from_block..=to_block {
         Sink::wait_until_included(sink.clone(), block_target).await;
         let res = sink.lock().await.flush_including(block_target);
+        processing_function(res.first().unwrap().to_owned()).await;
+    }
+}
+
+/// Streams synced events in steps of 1 block.
+/// More specifically it sorts events in order event if they come from different sources.
+/// The events have to be unpacked at consumer side, but that allows for pattern matching on events.
+pub async fn stream_synced_events<F, Fut>(
+    sink: StreamSink,
+    to_block: u64,
+    mut processing_function: F,
+) where
+    F: FnMut(SyncedEventsFlush) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let from_block = sink.lock().await.from_block;
+    for block_target in from_block..=to_block {
+        Sink::wait_until_included(sink.clone(), block_target).await;
+        let res = sink.lock().await.flush_including(block_target);
+        let (block_number, entries)= res.first().unwrap();
+        // TODO sort this
+        let all_logs = entries.values().sort
         processing_function(res.first().unwrap().to_owned()).await;
     }
 }
