@@ -67,7 +67,7 @@ impl Stream {
         Ok(s)
     }
 
-    // stream sink has to be bound before any event streaming can be done
+    /// stream sink has to be bound before any event streaming can be done
     pub fn bind_sink(&mut self, sink: StreamSink) {
         self.sink = Some(sink)
     }
@@ -87,10 +87,14 @@ impl Stream {
         let logs = self.web3.eth().logs(filter).await?;
         for log in &logs {
             if log.is_removed() {
-                panic!(
+                println!(
                     "Encountered removed block, increase confirmation blocks number. {:?}",
                     log
-                )
+                );
+                // we are not fucking around here
+                // we don't want the consumers to work with bad data
+                // you should have set confirmation blocks to a higher value
+                std::process::exit(-1)
             }
         }
         Ok(logs)
