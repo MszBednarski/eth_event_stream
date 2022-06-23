@@ -90,9 +90,9 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
     pub fn new(sources: Vec<A>, from_block: u64) -> Self {
         let mut store = BTreeMap::new() as BTreeMap<A, BTreeMap<u64, BTreeMap<u128, D>>>;
         let mut source_vals = HashMap::new();
-        for s in sources.clone() {
-            store.insert(s.clone(), BTreeMap::new());
-            source_vals.insert(s, from_block);
+        for source in sources.clone() {
+            store.insert(source.clone(), BTreeMap::new());
+            source_vals.insert(source, from_block);
         }
         let ps = PubSub::new(from_block);
         let sender = ps.sender();
@@ -105,6 +105,13 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
             source_vals,
             sender,
         }
+    }
+
+    /// adds new event stream sources this is ONLY FOR SETUP
+    pub fn add_source(&mut self, source: A) {
+        self.store.insert(source.clone(), BTreeMap::new());
+        self.source_vals.insert(source.clone(), self.from_block);
+        self.sources.push(source);
     }
 
     /// returns a new threadsafe sink

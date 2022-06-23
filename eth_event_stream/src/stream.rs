@@ -1,4 +1,4 @@
-use crate::sink::{StreamSignature, StreamSink};
+use crate::sink::{Sink, StreamSignature, StreamSink};
 use anyhow::Result;
 use ethabi::Event;
 use tokio::sync::watch;
@@ -23,6 +23,66 @@ pub struct Stream {
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
     web3: Web3<Http>,
+}
+
+/// Used to create multiple synchronized streams faster
+pub struct StreamFactory {
+    pub http_url: String,
+    pub from_block: u64,
+    pub to_block: u64,
+    pub confirmation_blocks: u8,
+    pub block_step: u64,
+    sink: StreamSink,
+}
+
+impl StreamFactory {
+    pub fn new(
+        http_url: String,
+        from_block: u64,
+        to_block: u64,
+        confirmation_blocks: u8,
+        block_step: u64,
+    ) -> Self {
+        StreamFactory {
+            http_url,
+            from_block,
+            to_block,
+            confirmation_blocks,
+            block_step,
+            sink: Sink::new_threadsafe(Vec::new(), from_block),
+        }
+    }
+
+    /// makes a new stream
+    pub async fn make(
+        &mut self,
+        address: Address,
+        event: Event,
+        block_notify_subscription: watch::Receiver<U64>,
+    ) -> Result<Stream> {
+        let mut stream = Stream::new(
+            self.http_url.clone(),
+            address,
+            self.from_block,
+            self.to_block,
+            event,
+            block_notify_subscription,
+        )
+        .await?;
+        stream.confirmation_blocks(self.confirmation_blocks);
+        stream.block_step(self.block_step);
+        // register source
+        self.sink.lock().await.add_source(stream.signature);
+        // register where to send events
+        stream.bind_sink(self.sink.clone());
+        Ok(stream)
+    }
+
+    /// consumes the factory and returns the sink to which the events go
+    /// call this at the end to get the sink to which the events will be trickling down
+    pub fn get_sink(self) -> StreamSink {
+        self.sink
+    }
 }
 
 impl Stream {
