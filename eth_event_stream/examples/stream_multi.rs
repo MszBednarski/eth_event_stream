@@ -1,12 +1,12 @@
 use eth_event_stream::{
     data_feed::block::BlockNotify,
-    sink::{stream_synced_blocks, Sink, StreamSignature, StreamSink, StreamSinkFlush},
-    stream::{http_web3, Stream},
+    sink::{stream_synced_blocks, Sink},
+    stream::Stream,
 };
 use ethereum_types::Address;
 use std::{env, sync::Arc};
 use tokio::sync::Mutex;
-use web3::types::Log;
+use web3::{transports::Http, Web3};
 
 #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
 #[derive(Debug)]
@@ -16,7 +16,7 @@ struct Erc20Transfer {}
 async fn main() -> anyhow::Result<()> {
     let http_url = env::var("HTTP_NODE_URL")?;
     let ws_url = env::var("WS_NODE_URL")?;
-    let web3 = http_web3(&http_url)?;
+    let web3 = Web3::new(Http::new(&http_url).unwrap());
     let usdc: &str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
     let contract_address = Address::from_slice(hex::decode(&usdc[2..])?.as_slice());
     let cur_block = web3.eth().block_number().await?.as_u64();

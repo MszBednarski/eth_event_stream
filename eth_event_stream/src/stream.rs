@@ -1,16 +1,10 @@
-use crate::sink::{Sink, StreamSink, StreamSignature};
+use crate::sink::{StreamSignature, StreamSink};
 use anyhow::Result;
 use ethabi::Event;
-use std::sync::Arc;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
 use web3::transports::Http;
 use web3::types::{Address, BlockNumber, Filter, FilterBuilder, Log, H256, U64};
-use web3::{api, transports, Web3};
-
-pub fn http_web3(http_url: &str) -> Result<api::Web3<web3::transports::Http>> {
-    let transport = transports::Http::new(http_url)?;
-    Ok(Web3::new(transport))
-}
+use web3::Web3;
 
 #[derive(Debug)]
 pub struct Stream {
@@ -25,13 +19,11 @@ pub struct Stream {
     sink: Option<StreamSink>,
     block_step: u64,
     block_notify_subscription: watch::Receiver<U64>,
-    event: Event,
     /// used for the filter builder
     f_contract_address: Vec<Address>,
     f_topic: Option<Vec<H256>>,
     web3: Web3<Http>,
 }
-
 
 impl Stream {
     /// builds filter for one time call to eth.logs
@@ -68,7 +60,6 @@ impl Stream {
             to_block: U64::from(to_block),
             confirmation_blocks,
             signature: (address, event.signature().clone()),
-            event,
             f_contract_address,
             f_topic,
             web3,
@@ -166,7 +157,7 @@ impl Stream {
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
     pub async fn block_stream(&mut self) -> Result<()> {
-        let web3 = http_web3(&self.http_url)?;
+        let web3 = Web3::new(Http::new(&self.http_url).unwrap());
         // set the stream mode to live or historical
         // based on the users request
         let cur_block_number = web3.eth().block_number().await?;
