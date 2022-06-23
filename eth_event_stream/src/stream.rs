@@ -159,12 +159,9 @@ impl Stream {
         // based on the users request
         let cur_block_number = web3.eth().block_number().await?;
         // bool if we need to stream live logs too
-        // the -1 is due to the sink needing 1 more block to flush inclusive
-        let need_live = (cur_block_number - self.confirmation_blocks - 1u64) < self.to_block;
+        let need_live = (cur_block_number - self.confirmation_blocks) < self.to_block;
         if !need_live {
-            // we need to get 1 more block in historical than requested
-            // this is due to the sink needing 1 more block to be sure that it got all events
-            self.stream_historical_logs(self.from_block, self.to_block + 1u64)
+            self.stream_historical_logs(self.from_block, self.to_block)
                 .await?;
             return Ok(());
         }
@@ -174,7 +171,7 @@ impl Stream {
             .await?;
         // now stream the live logs
         // have to get one more block to ensure sink flushes inclusive
-        self.stream_live_logs(safe_last_historical + 1u64, self.to_block + 1u64)
+        self.stream_live_logs(safe_last_historical + 1u64, self.to_block)
             .await?;
         Ok(())
     }
@@ -201,9 +198,7 @@ mod test {
         let to_block = from_block + 8;
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
         let sink = Arc::new(Mutex::new(Sink::new(vec![address], from_block)));
-        #[eth_event_macro::event(
-            "Transfer(address indexed from, address indexed to, uint value)"
-        )]
+        #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
         struct Erc20Transfer {}
         let mut stream = Stream::new(
             http_url,

@@ -24,6 +24,7 @@ pub struct Sink<SourceKey, T> {
     source_vals: HashMap<SourceKey, u64>,
     /// needed so that the sink knows how much it needs to backfill for some sources
     bottom: u64,
+    from_block: u64,
     ps: PubSub<u64>,
     sender: Arc<watch::Sender<u64>>,
 }
@@ -43,6 +44,7 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
             store,
             sources,
             bottom: from_block,
+            from_block,
             source_vals,
             sender,
         }
@@ -50,12 +52,13 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
 
     /// returns inclusive block up to which the synced data can be flushed / was flushed
     pub fn synced_including(&mut self) -> Option<u64> {
-        // we can flush up to the min(of all maximums) - 1
+        if self.source_vals.values().min() == Some(&self.from_block) {
+            // we are at the very beginning and we are not actually synced
+            return None;
+        }
+        // we can flush up to the min(of all maximums)
         match self.source_vals.values().min() {
-            Some(val) => match val {
-                0 => None,
-                _ => Some(val.clone() - 1),
-            },
+            Some(val) => Some(val.clone()),
             None => None,
         }
     }
@@ -160,13 +163,7 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
     }
 
     /// put key into sink and then sync its state
-    pub fn put_sync(
-        &mut self,
-        source_key: &A,
-        block_key: u64,
-        log_key: u128,
-        data: D,
-    ) -> Result<()> {
+    fn put_sync(&mut self, source_key: &A, block_key: u64, log_key: u128, data: D) -> Result<()> {
         self.put(source_key, block_key, log_key, data)?;
         self.sync(source_key, block_key)
     }
@@ -192,7 +189,7 @@ mod tests {
         sink.put_sync(&1, 3, 0, "yo").unwrap();
         assert!(sink.synced_including().is_none());
         sink.put_sync(&2, 4, 0, "hi").unwrap();
-        assert_eq!(sink.synced_including().unwrap(), 2);
+        assert_eq!(sink.synced_including().unwrap(), 3);
     }
 
     use std::sync::Arc;
@@ -218,8 +215,8 @@ mod tests {
         });
         assert!(sink.lock().await.synced_including().is_none());
         println!("Before waiting {:?}", sink.lock().await.synced_including());
-        Sink::wait_until_included(sink.clone(), 6).await;
-        assert_eq!(sink.lock().await.synced_including().unwrap(), 6);
+        Sink::wait_until_included(sink.clone(), 7).await;
+        assert_eq!(sink.lock().await.synced_including().unwrap(), 7);
         Ok(())
     }
 
@@ -233,10 +230,12 @@ mod tests {
         let synced = sink.synced_including().unwrap();
         assert_eq!(
             sink.flush_including(synced),
-            vec![(0, HashMap::from([(-5, vec![]), (-7, vec![])]))]
+            vec![
+                (0, HashMap::from([(-5, vec![]), (-7, vec![])])),
+                (1, HashMap::from([(-5, vec![]), (-7, vec![0])]))
+            ]
         );
 
-        sink.put_sync(&-7, 1, 1, 42).unwrap();
         sink.put_sync(&-7, 3, 0, 0).unwrap();
         sink.put_sync(&-5, 4, 0, 0).unwrap();
 
@@ -244,8 +243,8 @@ mod tests {
         assert_eq!(
             sink.flush_including(synced),
             vec![
-                (1, HashMap::from([(-5, vec![]), (-7, vec![0, 42])])),
-                (2, HashMap::from([(-5, vec![0]), (-7, vec![])]))
+                (2, HashMap::from([(-5, vec![0]), (-7, vec![])])),
+                (3, HashMap::from([(-5, vec![]), (-7, vec![0])]))
             ]
         );
     }
