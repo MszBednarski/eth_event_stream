@@ -18,8 +18,11 @@ pub struct Stream {
     pub address: Address,
     pub from_block: U64,
     pub to_block: U64,
+    // Stream signature that is the composition of the
+    // watched address and the event signature
+    pub signature: StreamSignature,
     confirmation_blocks: u8,
-    sink: Arc<Mutex<Sink<Address, Log>>>,
+    sink: Option<StreamSink>,
     block_step: u64,
     block_notify_subscription: watch::Receiver<U64>,
     event: Event,
@@ -28,6 +31,9 @@ pub struct Stream {
     f_topic: Option<Vec<H256>>,
     web3: Web3<Http>,
 }
+
+pub type StreamSignature = (Address, H256);
+pub type StreamSink = Arc<Mutex<Sink<StreamSignature, Log>>>;
 
 impl Stream {
     /// builds filter for one time call to eth.logs
@@ -48,7 +54,6 @@ impl Stream {
         to_block: u64,
         event: Event,
         block_notify_subscription: watch::Receiver<U64>,
-        sink: Arc<Mutex<Sink<Address, Log>>>,
     ) -> Result<Stream> {
         let f_contract_address = vec![address];
         let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
@@ -59,17 +64,23 @@ impl Stream {
             block_notify_subscription,
             block_step: 1000,
             http_url,
-            sink,
+            sink: None,
             address,
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
             confirmation_blocks,
+            signature: (address, event.signature().clone()),
             event,
             f_contract_address,
             f_topic,
             web3,
         };
         Ok(s)
+    }
+
+    // stream sink has to be bound before any event streaming can be done
+    pub fn bind_sink(&mut self, sink: StreamSink) {
+        self.sink = Some(sink)
     }
 
     pub fn block_step(&mut self, new_step: u64) {
@@ -90,19 +101,22 @@ impl Stream {
 
     /// end block inclusive
     async fn put(&self, vals: Vec<Log>, end_block: u64) -> Result<()> {
-        self.sink.lock().await.put_multiple(
-            &self.address,
-            vals.iter()
-                .map(|l| {
-                    (
-                        l.block_number.unwrap().as_u64(),
-                        l.log_index.unwrap().as_u128(),
-                        l.to_owned(),
-                    )
-                })
-                .collect(),
-            end_block,
-        )
+        match &self.sink {
+            Some(sink) => sink.lock().await.put_multiple(
+                &self.signature,
+                vals.iter()
+                    .map(|l| {
+                        (
+                            l.block_number.unwrap().as_u64(),
+                            l.log_index.unwrap().as_u128(),
+                            l.to_owned(),
+                        )
+                    })
+                    .collect(),
+                end_block,
+            ),
+            None => panic!("Sink has to be bound to stream in order to stream logs."),
+        }
     }
 
     async fn get_and_put_logs(&self, start: &U64, end: &U64) -> Result<()> {
@@ -179,7 +193,7 @@ impl Stream {
 
 #[cfg(test)]
 mod test {
-    use super::Stream;
+    use super::{Stream, StreamSink};
     use crate::{data_feed::block::BlockNotify, sink::Sink};
     use anyhow::Result;
     use std::env;
@@ -189,7 +203,7 @@ mod test {
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
-    async fn test_stream() -> Result<(Stream, Arc<Mutex<Sink<Address, Log>>>, u64)> {
+    async fn test_stream() -> Result<(Stream, StreamSink, u64)> {
         let http_url = env::var("HTTP_NODE_URL")?;
         let ws_url = env::var("WS_NODE_URL")?;
         let address = Address::from_slice(hex::decode(USDC)?.as_slice());
@@ -197,7 +211,6 @@ mod test {
         // from + 10
         let to_block = from_block + 8;
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
-        let sink = Arc::new(Mutex::new(Sink::new(vec![address], from_block)));
         #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
         struct Erc20Transfer {}
         let mut stream = Stream::new(
@@ -207,9 +220,13 @@ mod test {
             to_block,
             Erc20Transfer::event(),
             notify.subscribe(),
-            sink.clone(),
         )
         .await?;
+        let sink = Arc::new(Mutex::new(Sink::new(
+            vec![stream.signature.clone()],
+            from_block,
+        )));
+        stream.bind_sink(sink.clone());
         stream.block_step(2);
         Ok((stream, sink, to_block))
     }
@@ -225,7 +242,7 @@ mod test {
     async fn test_eth_logs_number() -> Result<()> {
         // check how to use eth logs
         let (mut stream, sink, to_block) = test_stream().await?;
-        let addr = stream.address.clone();
+        let sig = stream.signature;
 
         tokio::spawn(async move { stream.block_stream().await });
 
@@ -236,7 +253,7 @@ mod test {
         let results = sink.lock().await.flush_including(to_block);
         // println!("{:?}", sink.lock().await);
         for (block_number, mut entry) in results {
-            let block_logs = entry.get_mut(&addr).unwrap();
+            let block_logs = entry.get_mut(&sig).unwrap();
             println!("Got block {} size {}", block_number, block_logs.len());
             all_logs.append(block_logs);
         }

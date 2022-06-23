@@ -1,7 +1,7 @@
 use eth_event_stream::{
     data_feed::block::BlockNotify,
     sink::Sink,
-    stream::{http_web3, Stream},
+    stream::{http_web3, Stream, StreamSignature, StreamSink},
 };
 use ethereum_types::Address;
 use std::{env, sync::Arc};
@@ -12,23 +12,19 @@ use web3::types::Log;
 #[derive(Debug)]
 struct Erc20Transfer {}
 
-async fn process_batch(
-    block_target: u64,
-    address: &Address,
-    sink: &Arc<Mutex<Sink<Address, Log>>>,
-) {
+async fn process_batch(block_target: u64, sig: &StreamSignature, sink: &StreamSink) {
     println!("{}", block_target);
     Sink::wait_until_included(sink.clone(), block_target).await;
     let res = sink.lock().await.flush_including(block_target);
     for (number, entry) in res {
         let transfers: Vec<Erc20Transfer> = entry
-            .get(address)
+            .get(sig)
             .unwrap()
             .iter()
             .map(|l| Erc20Transfer::from(l.to_owned()))
             .collect();
         println!("==> Block {}. Got logs. {}", number, transfers.len());
-        println!("First log {:?}", transfers.first());
+        // println!("First log {:?}", transfers.first());
     }
 }
 
@@ -48,7 +44,6 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let notify = BlockNotify::new(&http_url, &ws_url).await?;
-    let sink = Arc::new(Mutex::new(Sink::new(vec![contract_address], from_block)));
     let mut stream = Stream::new(
         http_url,
         contract_address,
@@ -56,19 +51,21 @@ async fn main() -> anyhow::Result<()> {
         to_block,
         Erc20Transfer::event(),
         notify.subscribe(),
-        sink.clone(),
     )
     .await?;
+    let signature = stream.signature;
+    let sink = Arc::new(Mutex::new(Sink::new(vec![stream.signature], from_block)));
+    stream.bind_sink(sink.clone());
     stream.confirmation_blocks(3);
 
     tokio::spawn(async move { stream.block_stream().await });
 
     let step = 5;
     for cur in ((from_block + step)..=to_block).step_by(5) {
-        process_batch(cur, &contract_address, &sink).await
+        process_batch(cur, &signature, &sink).await
     }
     if to_block - from_block % step != 0 {
-        process_batch(to_block, &contract_address, &sink).await
+        process_batch(to_block, &signature, &sink).await
     }
     Ok(())
 }
