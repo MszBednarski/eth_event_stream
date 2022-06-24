@@ -1,7 +1,11 @@
 use crate::sink::{Sink, StreamSignature, StreamSink};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use ethabi::Event;
 use tokio::sync::watch;
+use tokio_retry::{
+    strategy::{jitter, ExponentialBackoff},
+    Retry,
+};
 use web3::transports::Http;
 use web3::types::{Address, BlockNumber, Filter, FilterBuilder, Log, H256, U64};
 use web3::Web3;
@@ -140,21 +144,39 @@ impl Stream {
         self.confirmation_blocks = new_confirmation;
     }
 
+    async fn get_cur_block(&self) -> Result<U64> {
+        let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(4);
+        // retry to get the logs
+        let res = Retry::spawn(retry_strategy, || self.web3.eth().block_number()).await;
+        if res.is_err() {
+            return Err(anyhow!("Failed getting current block {:?}", res.err()));
+        }
+        Ok(res.unwrap())
+    }
+
     /// this cannot get you logs on arbitrary range
     /// this does just one call to eth.logs
     pub async fn get_logs(&self, from_block: &U64, to_block: &U64) -> Result<Vec<Log>> {
-        let filter = self.build_filter(from_block.clone(), to_block.clone());
-        let logs = self.web3.eth().logs(filter).await?;
+        let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(4);
+        // retry to get the logs
+        let logs_res = Retry::spawn(retry_strategy, || {
+            let filter = self.build_filter(from_block.clone(), to_block.clone());
+            self.web3.eth().logs(filter)
+        })
+        .await;
+        if logs_res.is_err() {
+            return Err(anyhow!(
+                "Fatal error when fetching logs {:?}",
+                logs_res.err()
+            ));
+        }
+        let logs = logs_res.unwrap();
         for log in &logs {
             if log.is_removed() {
-                println!(
+                return Err(anyhow!(
                     "Encountered removed block, increase confirmation blocks number. {:?}",
                     log
-                );
-                // we are not fucking around here
-                // we don't want the consumers to work with bad data
-                // you should have set confirmation blocks to a higher value
-                std::process::exit(-1)
+                ));
             }
         }
         Ok(logs)
@@ -176,7 +198,9 @@ impl Stream {
                     .collect(),
                 end_block,
             ),
-            None => panic!("Sink has to be bound to stream in order to stream logs."),
+            None => Err(anyhow!(
+                "Sink has to be bound to stream in order to stream logs."
+            )),
         }
     }
 
@@ -205,7 +229,7 @@ impl Stream {
     async fn stream_live_logs(&mut self, from_block: U64, to_block: U64) -> Result<()> {
         let mut get_from = from_block;
         // due to uncles we need to track also current block
-        // to be sure that when the block is resubmitted 
+        // to be sure that when the block is resubmitted
         // the safe_block < get_from check does not fail
         let mut previous_block = from_block;
         while self.block_notify_subscription.changed().await.is_ok() {
@@ -229,32 +253,51 @@ impl Stream {
                 return Ok(());
             }
         }
-        panic!("Block notify subscription failed.");
+        println!("Block notify subscription failed.");
+        std::process::exit(-1);
     }
 
     /// uses parameter sender to send blocks of eth logs to all recievers
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
     pub async fn block_stream(&mut self) -> Result<()> {
-        let web3 = Web3::new(Http::new(&self.http_url).unwrap());
         // set the stream mode to live or historical
         // based on the users request
-        let cur_block_number = web3.eth().block_number().await?;
+        let cur_block_res = self.get_cur_block().await;
+        if cur_block_res.is_err() {
+            println!("{:?}", cur_block_res.err());
+            std::process::exit(-1);
+        }
+        let cur_block_number = cur_block_res.unwrap();
         // bool if we need to stream live logs too
         let need_live = (cur_block_number - self.confirmation_blocks) < self.to_block;
         if !need_live {
-            self.stream_historical_logs(self.from_block, self.to_block)
-                .await?;
-            return Ok(());
+            let res = self
+                .stream_historical_logs(self.from_block, self.to_block)
+                .await;
+            if res.is_err() {
+                println!("{:?}", res.err());
+                std::process::exit(-1)
+            }
         }
         // safe last historical block we can get
         let safe_last_historical = cur_block_number - self.confirmation_blocks;
-        self.stream_historical_logs(self.from_block, safe_last_historical)
-            .await?;
+        let hist_res = self
+            .stream_historical_logs(self.from_block, safe_last_historical)
+            .await;
+        if hist_res.is_err() {
+            println!("{:?}", hist_res.err());
+            std::process::exit(-1);
+        }
         // now stream the live logs
         // have to get one more block to ensure sink flushes inclusive
-        self.stream_live_logs(safe_last_historical + 1u64, self.to_block)
-            .await?;
+        let live_res = self
+            .stream_live_logs(safe_last_historical + 1u64, self.to_block)
+            .await;
+        if live_res.is_err() {
+            println!("{:?}", live_res.err());
+            std::process::exit(-1);
+        }
         Ok(())
     }
 }

@@ -1,21 +1,30 @@
+use clap::Parser;
 use eth_event_stream::{
     address,
     data_feed::block::BlockNotify,
-    sink::{reduce_synced_events, stream_synced_events, EventReducer, StreamSignature},
+    sink::{reduce_synced_events, EventReducer, StreamSignature},
     stream::StreamFactory,
 };
+use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
-use std::{
-    borrow::{Borrow, BorrowMut},
-    collections::HashMap,
-};
 use tokio::sync::Mutex;
 use web3::{
     transports::Http,
     types::{Address, Log},
     Web3,
 };
+
+/// Event stream reduce example
+#[derive(Parser, Debug)]
+struct Args {
+    // Number of previous blocks to get
+    #[clap(long, default_value_t = 40)]
+    diff_neg: u64,
+    // Number of future blocks to get
+    #[clap(long, default_value_t = 5)]
+    diff_pos: u64,
+}
 
 #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
 #[derive(Debug)]
@@ -62,15 +71,16 @@ impl EventReducer for USDCNetFlow {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let flags = Args::parse();
     let http_url = env::var("HTTP_NODE_URL")?;
     let ws_url = env::var("WS_NODE_URL")?;
     let web3 = Web3::new(Http::new(&http_url).unwrap());
     let usdc_address = address("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
     let weth_address = address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
     let cur_block = web3.eth().block_number().await?.as_u64();
-    let from_block = cur_block - 40;
+    let from_block = cur_block - flags.diff_neg;
     // till the end of time pls
-    let to_block = u64::max_value();
+    let to_block = cur_block + flags.diff_pos;
     println!(
         "Going to stream from block {} to {} inclusive",
         from_block, to_block
@@ -108,13 +118,13 @@ async fn main() -> anyhow::Result<()> {
     while new_blocks_sub.changed().await.is_ok() {
         tokio::time::sleep(tokio::time::Duration::new(1, 0)).await;
         let cur_block = new_blocks_sub.borrow().as_u64();
-        println!("{:<10} <=== Live block", cur_block);
+        println!("{:<17} <=== Live block", cur_block);
         let locked = reducer.lock().await;
         println!(
-            "{:<10} <=== Netflows block",
-            locked.current_block.unwrap_or_default()
+            "Live - {:<10} <=== Netflows block",
+            cur_block - locked.current_block.unwrap_or_default()
         );
-        println!("{:<10} Addresses", locked.netflows.keys().len());
+        println!("{:<17} Addresses", locked.netflows.keys().len());
         let positive_flows = locked
             .netflows
             .values()
@@ -127,8 +137,8 @@ async fn main() -> anyhow::Result<()> {
             .filter(|&a| a < &0i128)
             .collect::<Vec<&i128>>()
             .len();
-        println!("{positive_flows:<10} Positive flows");
-        println!("{negative_flows:<10} Negative flows");
+        println!("{positive_flows:<17} Positive flows");
+        println!("{negative_flows:<17} Negative flows");
         println!("");
     }
 

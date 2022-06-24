@@ -56,6 +56,7 @@ impl BlockNotify {
                 let must_err = BlockNotify::stream_blocks(&block_sender, &ws_url_).await;
                 if must_err.is_err() {
                     println!("Issue with block stream {:?}.", must_err.err());
+                    std::process::exit(-1);
                 }
             }
         });
