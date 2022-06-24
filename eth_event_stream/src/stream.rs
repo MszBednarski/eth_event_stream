@@ -119,7 +119,7 @@ impl Stream {
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
             confirmation_blocks,
-            signature: (address, event.signature().clone()),
+            signature: StreamSignature(address, event.signature().clone()),
             f_contract_address,
             f_topic,
             web3,

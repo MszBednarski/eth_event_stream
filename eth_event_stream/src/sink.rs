@@ -31,7 +31,16 @@ pub struct Sink<SourceKey = StreamSignature, T = Log> {
     sender: Arc<watch::Sender<u64>>,
 }
 
-pub type StreamSignature = (Address, H256);
+#[derive(Clone, Debug, Hash, Eq, Ord, PartialEq, PartialOrd, Copy)]
+pub struct StreamSignature(pub Address, pub H256);
+
+impl StreamSignature {
+    /// returns whether the given event matches the signature
+    pub fn matches(&self, log: &Log) -> bool {
+        log.address == self.0 && log.topics.first().unwrap() == &self.1
+    }
+}
+
 pub type StreamSink = Arc<Mutex<Sink<StreamSignature, Log>>>;
 /// Stream sink flushes this when flush is called
 /// u64 are blocks
@@ -106,10 +115,39 @@ pub async fn stream_synced_events<F, Fut>(
         let (block_number, entries) = res.first().unwrap();
         // get all logs first
         let mut all_logs: Vec<Log> = entries.values().flatten().map(|a| a.to_owned()).collect();
-        // sort the logs by
+        // sort the logs by index
         all_logs.sort_by(|a, b| a.log_index.cmp(&b.log_index));
         processing_function((block_number.to_owned(), all_logs)).await;
     }
+}
+
+/// The next level is to pattern match and process on a stream of events
+pub trait EventReducer {
+    /// match a pattern on a vector of events
+    /// and reduce them to whatever you want
+    fn reduce(&mut self, block_number: u64, ordered_events: &[Log]);
+    /// creates a threadsafe reducer
+    fn new(sig: StreamSignature) -> Arc<Mutex<Self>>;
+}
+
+/// Use the EventReducer trait to implement your event pattern matcher processors
+pub async fn reduce_synced_events(
+    sink: StreamSink,
+    to_block: u64,
+    reducers: &Vec<Arc<Mutex<impl EventReducer>>>,
+) {
+    stream_synced_events(sink, to_block, |(block_number, all_logs)| async move {
+        for i in 0..all_logs.len() {
+            let logs_slice = &all_logs.as_slice()[i..];
+            // let each matcher process the slice separately
+            for reducer in reducers {
+                // if the matcher wants to process that slice
+                let mut locked_reducer = reducer.lock().await;
+                locked_reducer.reduce(block_number, logs_slice);
+            }
+        }
+    })
+    .await;
 }
 
 impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
