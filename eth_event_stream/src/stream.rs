@@ -204,15 +204,22 @@ impl Stream {
     /// streams live blocks from_block inclusive
     async fn stream_live_logs(&mut self, from_block: U64, to_block: U64) -> Result<()> {
         let mut get_from = from_block;
+        // due to uncles we need to track also current block
+        // to be sure that when the block is resubmitted 
+        // the safe_block < get_from check does not fail
+        let mut previous_block = from_block;
         while self.block_notify_subscription.changed().await.is_ok() {
             let cur_block = *self.block_notify_subscription.borrow();
+            // this is going to protect agains uncle blocks
+            // and resubmissions
+            if cur_block <= previous_block {
+                continue;
+            }
+            previous_block = cur_block;
             // the block that we can safely get finalized events
             let mut safe_block = cur_block - self.confirmation_blocks;
             if safe_block > to_block {
                 safe_block = to_block;
-            }
-            if safe_block < get_from {
-                panic!("Something went wrong with block order.");
             }
             self.get_and_put_logs(&get_from, &safe_block).await?;
             // set new get from block
