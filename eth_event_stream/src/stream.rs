@@ -260,7 +260,7 @@ impl Stream {
     /// uses parameter sender to send blocks of eth logs to all recievers
     /// on broadcast the logs are sorted in ascending order the way they were emmited
     /// in the blockchain EVM
-    pub async fn block_stream(&mut self) -> Result<()> {
+    pub async fn block_stream(&mut self) {
         // set the stream mode to live or historical
         // based on the users request
         let cur_block_res = self.get_cur_block().await;
@@ -298,7 +298,6 @@ impl Stream {
             println!("{:?}", live_res.err());
             std::process::exit(-1);
         }
-        Ok(())
     }
 }
 
