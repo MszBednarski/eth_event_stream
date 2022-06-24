@@ -1,7 +1,7 @@
 use crate::data_feed::pubsub::PubSub;
 use anyhow::Result;
 use std::borrow::Borrow;
-use std::cmp::{max, Ord};
+use std::cmp::{self, max, Ord};
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::hash::Hash;
@@ -103,10 +103,12 @@ pub async fn stream_synced_events<F, Fut>(
     for block_target in from_block..=to_block {
         Sink::wait_until_included(sink.clone(), block_target).await;
         let res = sink.lock().await.flush_including(block_target);
-        let (block_number, entries)= res.first().unwrap();
-        // TODO sort this
-        let all_logs = entries.values().sort
-        processing_function(res.first().unwrap().to_owned()).await;
+        let (block_number, entries) = res.first().unwrap();
+        // get all logs first
+        let mut all_logs: Vec<Log> = entries.values().flatten().map(|a| a.to_owned()).collect();
+        // sort the logs by
+        all_logs.sort_by(|a, b| a.log_index.cmp(&b.log_index));
+        processing_function((block_number.to_owned(), all_logs)).await;
     }
 }
 

@@ -1,5 +1,5 @@
 use eth_event_stream::{
-    address, data_feed::block::BlockNotify, sink::stream_synced_blocks, stream::StreamFactory,
+    address, data_feed::block::BlockNotify, sink::stream_synced_events, stream::StreamFactory,
 };
 use std::env;
 use web3::{transports::Http, Web3};
@@ -42,27 +42,44 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move { usdc_stream.block_stream().await });
     tokio::spawn(async move { weth_stream.block_stream().await });
 
-    stream_synced_blocks(sink, to_block, |(number, entry)| async move {
-        let usdc_transfers: Vec<Erc20Transfer> = entry
-            .get(&usdc_signature)
-            .unwrap()
-            .iter()
-            .map(|l| Erc20Transfer::from(l.to_owned()))
-            .collect();
-        let weth_transfers: Vec<Erc20Transfer> = entry
-            .get(&weth_signature)
-            .unwrap()
-            .iter()
-            .map(|l| Erc20Transfer::from(l.to_owned()))
-            .collect();
-        println!(
-            "==> Block {}. USDC transfers {} || WETH transfers {}",
-            number,
-            usdc_transfers.len(),
-            weth_transfers.len()
-        );
-        // println!("First log {:?}", transfers.first());
+    // stream ordered events from multiple sources in batches of 1 block
+    // alternative is to use `stream_synced_blocks` that separates events and
+    // they need to be got by signature
+    stream_synced_events(sink, to_block, |(number, logs)| async move {
+        if logs.len() != 0 {
+            let mut index = logs.first().unwrap().log_index.unwrap();
+            for i in 1..logs.len() {
+                let log = logs.get(i).unwrap();
+                if log.log_index.unwrap() <= index {
+                    panic!("events are unordered");
+                }
+                index = log.log_index.unwrap();
+            }
+        }
+        println!("==> Block {}. Events {}.", number, logs.len());
     })
     .await;
+    // stream_synced_blocks(sink, to_block, |(number, entry)| async move {
+    //     let usdc_transfers: Vec<Erc20Transfer> = entry
+    //         .get(&usdc_signature)
+    //         .unwrap()
+    //         .iter()
+    //         .map(|l| Erc20Transfer::from(l.to_owned()))
+    //         .collect();
+    //     let weth_transfers: Vec<Erc20Transfer> = entry
+    //         .get(&weth_signature)
+    //         .unwrap()
+    //         .iter()
+    //         .map(|l| Erc20Transfer::from(l.to_owned()))
+    //         .collect();
+    //     println!(
+    //         "==> Block {}. USDC transfers {} || WETH transfers {}",
+    //         number,
+    //         usdc_transfers.len(),
+    //         weth_transfers.len()
+    //     );
+    //     // println!("First log {:?}", transfers.first());
+    // })
+    // .await;
     Ok(())
 }
