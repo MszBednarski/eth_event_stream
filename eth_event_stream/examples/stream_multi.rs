@@ -69,7 +69,8 @@ async fn main() -> anyhow::Result<()> {
     let weth_address = address("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
     let cur_block = web3.eth().block_number().await?.as_u64();
     let from_block = cur_block - 40;
-    let to_block = cur_block + 4;
+    // till the end of time pls
+    let to_block = u64::max_value();
     println!(
         "Going to stream from block {} to {} inclusive",
         from_block, to_block
