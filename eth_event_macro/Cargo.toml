@@ -2,6 +2,8 @@
 name = "eth_event_macro"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Macro deriving utility functions based on solidity event declaration."
 
 [dependencies]
 syn = "1.0.98"

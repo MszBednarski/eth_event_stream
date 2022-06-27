@@ -2,6 +2,9 @@
 name = "eth_event_stream"
 version = "0.1.0"
 edition = "2021"
+exclude = ["*.sh"]
+license = "MIT"
+description = "Synchronized multiple type ethereum event streaming for arbitrary time frames."
 
 [dependencies]
 web3 = "0.18.0"
