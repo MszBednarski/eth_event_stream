@@ -1,5 +1,7 @@
 # eth_event_stream
 
+[![CI](https://github.com/MszBednarski/eth_event_stream/actions/workflows/main.yml/badge.svg)](https://github.com/MszBednarski/eth_event_stream/actions/workflows/main.yml)
+
 *Synchronized multiple type event streaming for arbitrary time frames*
 
 So you want to get events from the ethereum like blockchains. You wrote some event streaming, live and historical getters, but you want more. You tried writing some in typescript but you needed more threads, you wrote in python is also not it. Welcome you can rest here.
