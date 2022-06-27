@@ -5,9 +5,6 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    env:
-      HTTP_NODE_URL: ${{ secrets.HTTP_NODE_URL }}
-      WS_NODE_URL: ${{ secrets.WS_NODE_URL }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
@@ -27,6 +24,9 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    env:
+      HTTP_NODE_URL: ${{ secrets.HTTP_NODE_URL }}
+      WS_NODE_URL: ${{ secrets.WS_NODE_URL }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v2
