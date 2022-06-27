@@ -1,2 +1,2 @@
-pub mod pubsub;
 pub mod block;
+pub mod pubsub;
