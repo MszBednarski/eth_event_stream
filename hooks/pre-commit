@@ -57,15 +57,6 @@ else
 	printf "${SUCCESS}\n"
 fi
 
-printf "${PREFIX} Checking for bad whitespace ... "
-git diff-index --check --cached $against -- &>/dev/null
-if [ "$?" != 0 ]; then
-	FAILED=1
-	printf "${FAILURE}\n"
-else
-	printf "${SUCCESS}\n"
-fi
-
 printf "${PREFIX} Checking for rustfmt ... "
 command -v rustfmt &>/dev/null
 if [ $? == 0 ]; then
