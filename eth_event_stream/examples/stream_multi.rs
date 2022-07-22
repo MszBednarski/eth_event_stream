@@ -1,8 +1,7 @@
 use clap::Parser;
 use eth_event_stream::{
     address,
-    data_feed::block::BlockNotify,
-    sink::{reduce_synced_events, EventReducer, StreamSignature},
+    sink::{EventReducer, StreamSignature},
     stream::StreamFactory,
 };
 use std::collections::HashMap;
@@ -86,38 +85,47 @@ async fn main() -> anyhow::Result<()> {
         from_block, to_block
     );
 
-    let notify = BlockNotify::new(&http_url, &ws_url).await?;
-    let mut factory = StreamFactory::new(http_url, from_block, to_block, 2, 1000);
+    let confirmation_blocks = 2;
+    let mut factory = StreamFactory::new(
+        http_url,
+        ws_url,
+        from_block,
+        to_block,
+        confirmation_blocks,
+        1000,
+    )
+    .await?;
     // make streams
-    let mut usdc_stream = factory
-        .make(usdc_address, Erc20Transfer::event(), notify.subscribe())
+    let usdc_stream = factory
+        .add_stream(usdc_address, Erc20Transfer::event())
         .await?;
-    let mut weth_stream = factory
-        .make(weth_address, Erc20Transfer::event(), notify.subscribe())
+    let weth_stream = factory
+        .add_stream(weth_address, Erc20Transfer::event())
         .await?;
     // get their signatures
     let usdc_signature = usdc_stream.signature;
     let weth_signature = weth_stream.signature;
     // get their sink
-    let sink = factory.get_sink();
 
     // run the streams on separate threads
-    tokio::spawn(async move { usdc_stream.block_stream().await });
-    tokio::spawn(async move { weth_stream.block_stream().await });
+    usdc_stream.run_in_thread();
+    weth_stream.run_in_thread();
 
     let reducer = USDCNetFlow::new(usdc_signature);
+    // entrypoint of the program
+    factory.reduce(reducer.clone());
 
-    let reducer_in_thread = reducer.clone();
-    // stream and reduce events from multiple sources in batches of 1 block
-    tokio::spawn(
-        async move { reduce_synced_events(sink, to_block, &vec![reducer_in_thread]).await },
-    );
-
-    let mut new_blocks_sub = notify.subscribe();
+    let mut new_blocks_sub = factory.notify.subscribe();
 
     while new_blocks_sub.changed().await.is_ok() {
+        // lag a bit so reducer is updated
         tokio::time::sleep(tokio::time::Duration::new(1, 0)).await;
         let cur_block = new_blocks_sub.borrow().as_u64();
+        if (cur_block - confirmation_blocks as u64) > to_block {
+            // stop if we reached `to_block`
+            println!("finished.");
+            return Ok(());
+        }
         println!("{:<17} <=== Live block", cur_block);
         let locked = reducer.lock().await;
         println!(
@@ -141,45 +149,5 @@ async fn main() -> anyhow::Result<()> {
         println!("{negative_flows:<17} Negative flows");
         println!("");
     }
-
-    // stream ordered events from multiple sources in batches of 1 block
-    // alternative is to use `stream_synced_blocks` that separates events and
-    // they need to be got by signature
-    // stream_synced_events(sink, to_block, |(number, logs)| async move {
-    //     if logs.len() != 0 {
-    //         let mut index = logs.first().unwrap().log_index.unwrap();
-    //         for i in 1..logs.len() {
-    //             let log = logs.get(i).unwrap();
-    //             if log.log_index.unwrap() <= index {
-    //                 panic!("events are unordered");
-    //             }
-    //             index = log.log_index.unwrap();
-    //         }
-    //     }
-    //     println!("==> Block {}. Events {}.", number, logs.len());
-    // })
-    // .await;
-    // stream_synced_blocks(sink, to_block, |(number, entry)| async move {
-    //     let usdc_transfers: Vec<Erc20Transfer> = entry
-    //         .get(&usdc_signature)
-    //         .unwrap()
-    //         .iter()
-    //         .map(|l| Erc20Transfer::from(l.to_owned()))
-    //         .collect();
-    //     let weth_transfers: Vec<Erc20Transfer> = entry
-    //         .get(&weth_signature)
-    //         .unwrap()
-    //         .iter()
-    //         .map(|l| Erc20Transfer::from(l.to_owned()))
-    //         .collect();
-    //     println!(
-    //         "==> Block {}. USDC transfers {} || WETH transfers {}",
-    //         number,
-    //         usdc_transfers.len(),
-    //         weth_transfers.len()
-    //     );
-    //     // println!("First log {:?}", transfers.first());
-    // })
-    // .await;
     Ok(())
 }

@@ -171,7 +171,11 @@ impl<A: Ord + Clone + Hash, D: Clone> Sink<A, D> {
         }
     }
 
-    /// adds new event stream sources this is ONLY FOR SETUP
+    /// adds new event stream sources
+    /// sources can be also added dynamically:
+    /// consider you have sources A and B that are already synced to blocks b0, b1
+    /// in flushed b-1 there was an event that makes us want to stream new source from b0
+    /// that is going to be fine here
     pub fn add_source(&mut self, source: A) {
         self.store.insert(source.clone(), BTreeMap::new());
         self.source_vals.insert(source.clone(), self.from_block);
@@ -380,5 +384,42 @@ mod tests {
                 (3, HashMap::from([(-5, vec![]), (-7, vec![0])]))
             ]
         );
+    }
+
+    #[test]
+    /// lets try to test dynamic stream adding
+    fn test_dynamic_stream_add() {
+        let mut sink = Sink::new(vec![31337, 42], 0);
+        // add some keys
+        sink.put_sync(&31337, 1, 0, 11).unwrap();
+        sink.put_sync(&42, 2, 0, 12).unwrap();
+
+        // get the cur synced = 1
+        let synced = sink.synced_including().unwrap();
+        assert_eq!(
+            sink.flush_including(synced),
+            vec![
+                (0, HashMap::from([(31337, vec![]), (42, vec![])])),
+                (1, HashMap::from([(31337, vec![11]), (42, vec![])]))
+            ]
+        );
+
+        println!("Add another stream: 101");
+        sink.add_source(101);
+        // now the source syncs from block 2
+        println!("give 31337 block 3 data");
+        sink.put_sync(&31337, 3, 0, 14).unwrap();
+        println!("101 starts to sync from block synced + 1 = 2");
+        sink.put_sync(&101, 2, 0, 17).unwrap();
+
+        // verify cur synced = 2
+        let synced = sink.synced_including().unwrap();
+        assert_eq!(
+            sink.flush_including(synced),
+            vec![(
+                2,
+                HashMap::from([(31337, vec![]), (42, vec![12]), (101, vec![17])])
+            )]
+        )
     }
 }

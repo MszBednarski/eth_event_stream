@@ -1,7 +1,12 @@
-use crate::sink::{Sink, StreamSignature, StreamSink};
+use crate::{
+    data_feed::block::BlockNotify,
+    sink::{reduce_synced_events, EventReducer, Sink, StreamSignature, StreamSink},
+};
 use anyhow::{anyhow, Result};
 use ethabi::Event;
+use std::sync::Arc;
 use tokio::sync::watch;
+use tokio::sync::Mutex;
 use tokio_retry::{
     strategy::{jitter, ExponentialBackoff},
     Retry,
@@ -30,47 +35,67 @@ pub struct Stream {
 }
 
 /// Used to create multiple synchronized streams faster
+/// Going to be opinionated here. This allows you to create some service that is based on blockchain state.
+/// Use only one StreamFactory per process/service. One stream factory can be used to create some complex service.
+/// Since it can dynamically sync N different streams. Those streams should be coupled and work for some purpose.
+/// For instance you can use one StreamFactory to track all of uniswap by watching the pair factory and generating
+/// dynamic streams from there. If you need to replicate the same service to handle more traffic make a separate service using
+/// StreamFactory that has geth eth API and acts as a caching layer for the same requests.
 pub struct StreamFactory {
     pub http_url: String,
+    pub ws_url: String,
     pub from_block: u64,
     pub to_block: u64,
     pub confirmation_blocks: u8,
     pub block_step: u64,
-    sink: StreamSink,
+    /// the `clock` of this struct it makes all of the update functions and triggers tick based on the current
+    /// newest block on the blockchain
+    pub notify: BlockNotify,
+    pub sink: StreamSink,
 }
 
 impl StreamFactory {
-    pub fn new(
+    pub async fn new(
         http_url: String,
+        ws_url: String,
         from_block: u64,
         to_block: u64,
         confirmation_blocks: u8,
         block_step: u64,
-    ) -> Self {
-        StreamFactory {
+    ) -> Result<Self> {
+        // might be a bit lazy with the .unwrap()
+        let notify = BlockNotify::new(&http_url, &ws_url).await?;
+        Ok(StreamFactory {
             http_url,
+            ws_url,
             from_block,
             to_block,
             confirmation_blocks,
             block_step,
             sink: Sink::new_threadsafe(Vec::new(), from_block),
-        }
+            notify,
+        })
     }
 
-    /// makes a new stream
-    pub async fn make(
-        &mut self,
-        address: Address,
-        event: Event,
-        block_notify_subscription: watch::Receiver<U64>,
-    ) -> Result<Stream> {
+    /// Stream and reduce events from multiple sources in batches of 1 block.
+    /// Imagine this as a functional reduce over an infinite array of events in synced batches of 1 block.
+    /// calls `reduce_synced_events` under the hood
+    pub fn reduce(&self, reducer: Arc<Mutex<impl EventReducer + std::marker::Send + 'static>>) {
+        let sink = self.sink.clone();
+        let to_block = self.to_block;
+        tokio::spawn(async move { reduce_synced_events(sink, to_block, &vec![reducer]).await });
+    }
+
+    /// creates a new stream
+    /// adds it to the sink and syncs it with the rest
+    pub async fn add_stream(&mut self, address: Address, event: Event) -> Result<Stream> {
         let mut stream = Stream::new(
             self.http_url.clone(),
             address,
             self.from_block,
             self.to_block,
             event,
-            block_notify_subscription,
+            self.notify.subscribe(),
         )
         .await?;
         stream.confirmation_blocks(self.confirmation_blocks);
@@ -80,12 +105,6 @@ impl StreamFactory {
         // register where to send events
         stream.bind_sink(self.sink.clone());
         Ok(stream)
-    }
-
-    /// consumes the factory and returns the sink to which the events go
-    /// call this at the end to get the sink to which the events will be trickling down
-    pub fn get_sink(self) -> StreamSink {
-        self.sink
     }
 }
 
@@ -99,6 +118,13 @@ impl Stream {
             .to_block(BlockNumber::Number(to_block))
             .topics(self.f_topic.clone(), None, None, None)
             .build()
+    }
+
+    /// runs the stream in thread the stream will be feeding the incoming data into the `sink`
+    /// consumes the stream as you will not be able to reference it anymore since it is in a
+    /// new thread
+    pub fn run_in_thread(mut self) {
+        tokio::spawn(async move { self.block_stream().await });
     }
 
     pub async fn new(
