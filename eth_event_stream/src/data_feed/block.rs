@@ -10,16 +10,15 @@ use tokio_retry::{
 };
 use web3::futures::TryStreamExt;
 use web3::transports::{Http, WebSocket};
-use web3::types::U64;
 use web3::Web3;
 
 /// it maintains a tokio watch channel that all processes can listen to to know what is the current block
 pub struct BlockNotify {
-    ps: PubSub<U64>,
+    ps: PubSub<u64>,
 }
 
 impl BlockNotify {
-    async fn stream_blocks(block_sender: &Arc<Sender<U64>>, ws_url: &str) -> Result<()> {
+    async fn stream_blocks(block_sender: &Arc<Sender<u64>>, ws_url: &str) -> Result<()> {
         // tryhard to make sure websocket is connected
         // do it indefinitely
         let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(5);
@@ -36,14 +35,14 @@ impl BlockNotify {
                 return Err(anyhow!("Block number is None."));
             }
             let block_number = block.number.unwrap();
-            block_sender.send(block_number).unwrap();
+            block_sender.send(block_number.as_u64()).unwrap();
         }
     }
 
     pub async fn new(http_url: &String, ws_url: &String) -> Result<Self> {
         let http_t = Http::new(&http_url.as_str())?;
         let http = Web3::new(http_t);
-        let init_block = http.eth().block_number().await?;
+        let init_block = http.eth().block_number().await?.as_u64();
         let ps = PubSub::new(init_block);
 
         // sender we move into the task
@@ -63,7 +62,7 @@ impl BlockNotify {
         Ok(BlockNotify { ps })
     }
 
-    pub fn subscribe(&self) -> Receiver<U64> {
+    pub fn subscribe(&self) -> Receiver<u64> {
         self.ps.subscribe()
     }
 }
