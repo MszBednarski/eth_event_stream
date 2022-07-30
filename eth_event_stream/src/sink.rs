@@ -8,7 +8,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
-use web3::types::{Address, Log, H256};
+use ethers::prelude::{Address, Log, H256};
 
 /// The stream is feeding us events in block order
 /// This datastructure needs to be able to:

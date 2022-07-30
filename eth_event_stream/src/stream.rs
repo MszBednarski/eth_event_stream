@@ -3,7 +3,11 @@ use crate::{
     sink::{reduce_synced_events, EventReducer, Sink, StreamSignature, StreamSink},
 };
 use anyhow::{anyhow, Result};
-use ethabi::Event;
+use ethers::prelude::{
+    Address, BlockNumber, Filter, FilterBlockOption, Http, Log, Provider, ValueOrArray, H160, H256,
+    U64,
+};
+use ethers::{abi::Event, prelude::Middleware};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
@@ -11,9 +15,6 @@ use tokio_retry::{
     strategy::{jitter, ExponentialBackoff},
     Retry,
 };
-use web3::transports::Http;
-use web3::types::{Address, BlockNumber, Filter, FilterBuilder, Log, H256, U64};
-use web3::Web3;
 
 #[derive(Debug)]
 pub struct Stream {
@@ -27,11 +28,11 @@ pub struct Stream {
     confirmation_blocks: u8,
     sink: Option<StreamSink>,
     block_step: u64,
-    block_notify_subscription: watch::Receiver<U64>,
+    block_notify_subscription: watch::Receiver<u64>,
     /// used for the filter builder
-    f_contract_address: Vec<Address>,
-    f_topic: Option<Vec<H256>>,
-    web3: Web3<Http>,
+    f_contract_address: ValueOrArray<Address>,
+    f_topic: H256,
+    provider: Provider<Http>,
 }
 
 /// Used to create multiple synchronized streams faster
@@ -63,7 +64,6 @@ impl StreamFactory {
         confirmation_blocks: u8,
         block_step: u64,
     ) -> Result<Self> {
-        // might be a bit lazy with the .unwrap()
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
         Ok(StreamFactory {
             http_url,
@@ -88,13 +88,13 @@ impl StreamFactory {
 
     /// creates a new stream
     /// adds it to the sink and syncs it with the rest
-    pub async fn add_stream(&mut self, address: Address, event: Event) -> Result<Stream> {
+    pub async fn add_stream(&mut self, address: H160, signature: H256) -> Result<Stream> {
         let mut stream = Stream::new(
             self.http_url.clone(),
             address,
             self.from_block,
             self.to_block,
-            event,
+            signature,
             self.notify.subscribe(),
         )
         .await?;
@@ -111,13 +111,11 @@ impl StreamFactory {
 impl Stream {
     /// builds filter for one time call to eth.logs
     fn build_filter(&self, from_block: U64, to_block: U64) -> Filter {
-        FilterBuilder::default()
+        Filter::new()
             .address(self.f_contract_address.clone())
-            .from_block(BlockNumber::Number(from_block))
-            // just get 10 blocks to make sure this returns
-            .to_block(BlockNumber::Number(to_block))
-            .topics(self.f_topic.clone(), None, None, None)
-            .build()
+            .from_block(from_block)
+            .to_block(to_block)
+            .topic0(self.f_topic.clone())
     }
 
     /// runs the stream in thread the stream will be feeding the incoming data into the `sink`
@@ -127,17 +125,17 @@ impl Stream {
         tokio::spawn(async move { self.block_stream().await });
     }
 
+    /// * `ftopic` - the topic returned by EventName::signature()
     pub async fn new(
         http_url: String,
         address: Address,
         from_block: u64,
         to_block: u64,
-        event: Event,
-        block_notify_subscription: watch::Receiver<U64>,
+        f_topic: H256,
+        block_notify_subscription: watch::Receiver<u64>,
     ) -> Result<Stream> {
-        let f_contract_address = vec![address];
-        let f_topic = Some(vec![H256::from_slice(event.signature().as_bytes())]);
-        let web3 = Web3::new(Http::new(http_url.as_str())?);
+        let f_contract_address = ValueOrArray::Value(address);
+        let provider = Provider::<Http>::try_from(http_url.clone())?;
         // I found that 2 block delay usually feeds reliably
         let confirmation_blocks = 2u8;
         let s = Stream {
@@ -149,10 +147,10 @@ impl Stream {
             from_block: U64::from(from_block),
             to_block: U64::from(to_block),
             confirmation_blocks,
-            signature: StreamSignature(address, event.signature().clone()),
+            signature: StreamSignature(address, f_topic.clone()),
             f_contract_address,
             f_topic,
-            web3,
+            provider,
         };
         Ok(s)
     }
@@ -173,11 +171,11 @@ impl Stream {
     async fn get_cur_block(&self) -> Result<U64> {
         let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(4);
         // retry to get the logs
-        let res = Retry::spawn(retry_strategy, || self.web3.eth().block_number()).await;
+        let res = Retry::spawn(retry_strategy, || self.provider.get_block_number()).await;
         if res.is_err() {
             return Err(anyhow!("Failed getting current block {:?}", res.err()));
         }
-        Ok(res.unwrap())
+        Ok(U64([res.unwrap().as_u64()]))
     }
 
     /// this cannot get you logs on arbitrary range
@@ -185,11 +183,8 @@ impl Stream {
     pub async fn get_logs(&self, from_block: &U64, to_block: &U64) -> Result<Vec<Log>> {
         let retry_strategy = ExponentialBackoff::from_millis(10).map(jitter).take(4);
         // retry to get the logs
-        let logs_res = Retry::spawn(retry_strategy, || {
-            let filter = self.build_filter(from_block.clone(), to_block.clone());
-            self.web3.eth().logs(filter)
-        })
-        .await;
+        let filter = self.build_filter(from_block.clone(), to_block.clone());
+        let logs_res = Retry::spawn(retry_strategy, || self.provider.get_logs(&filter)).await;
         if logs_res.is_err() {
             return Err(anyhow!(
                 "Fatal error when fetching logs {:?}",
@@ -198,7 +193,7 @@ impl Stream {
         }
         let logs = logs_res.unwrap();
         for log in &logs {
-            if log.is_removed() {
+            if log.removed.is_some() && log.removed.unwrap() {
                 return Err(anyhow!(
                     "Encountered removed block, increase confirmation blocks number. {:?}",
                     log
@@ -259,7 +254,7 @@ impl Stream {
         // the safe_block < get_from check does not fail
         let mut previous_block = from_block;
         while self.block_notify_subscription.changed().await.is_ok() {
-            let cur_block = *self.block_notify_subscription.borrow();
+            let cur_block = U64([*self.block_notify_subscription.borrow()]);
             // this is going to protect agains uncle blocks
             // and resubmissions
             if cur_block <= previous_block {
@@ -332,10 +327,11 @@ mod test {
     use super::{Stream, StreamSink};
     use crate::{data_feed::block::BlockNotify, sink::Sink};
     use anyhow::Result;
+    use ethers::contract::EthEvent;
+    use ethers::prelude::{abigen, Address};
     use std::env;
     use std::sync::Arc;
     use tokio::sync::Mutex;
-    use web3::types::{Address, Log};
 
     const USDC: &str = "A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 
@@ -347,14 +343,18 @@ mod test {
         // from + 10
         let to_block = from_block + 8;
         let notify = BlockNotify::new(&http_url, &ws_url).await?;
-        #[eth_event_macro::event("Transfer(address indexed from, address indexed to, uint value)")]
-        struct Erc20Transfer {}
+        abigen!(
+            Transfer,
+            r#"[
+                event Transfer(address indexed from, address indexed to, uint value)
+            ]"#,
+        );
         let mut stream = Stream::new(
             http_url,
             address,
             from_block,
             to_block,
-            Erc20Transfer::event(),
+            TransferFilter::signature(),
             notify.subscribe(),
         )
         .await?;

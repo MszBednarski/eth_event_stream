@@ -8,14 +8,17 @@ description = "Synchronized multiple type ethereum event streaming for arbitrary
 
 [dependencies]
 web3 = "0.18.0"
-tokio = "1.19.2"
+tokio = { version = "1.19.2", features = ["full"] }
 anyhow = "1.0"
 hex = "0.4.3"
 ethabi = "16.0.0"
 nom = "7.1.1"
 tokio-retry = "0.3"
 ethereum-types = "0.12.1"
+rand = "0.8.5"
+ethers = "0.14.0" 
 eth_event_macro = { version = "0.1.0", path = "../eth_event_macro" }
+serde = { version = "1.0.124", features = ["derive"] }
 
 [dev-dependencies]
 clap = { version = "3.0.0-rc.9", features = ["derive"] }
